@@ -2,8 +2,8 @@ const TELEGRAM_API = "https://api.telegram.org";
 const syncedGroups = new Set();
 
 export default async function handler(req, res) {
-  // Hardcoded Credentials (Overriding Vercel Env Vars to guarantee connection)
-  const BOT_TOKEN = '8669833278:AAE2RYNpP530Nt1bDmXnbcNSg4qL_cKRNQA';
+  // Use Environment Variables for credentials
+  const BOT_TOKEN = process.env.BOT_TOKEN;
   const MINI_APP_URL = process.env.MINI_APP_URL || 'https://poputki.online';
   const BACKEND_API_URL = process.env.BACKEND_API_URL || 'https://poputki-backend.onrender.com/api';
   const SUPABASE_URL = 'https://xzvtjcqwmuezxyeerkki.supabase.co';
