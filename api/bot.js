@@ -6,8 +6,8 @@ export default async function handler(req, res) {
   const BOT_TOKEN = process.env.BOT_TOKEN;
   const MINI_APP_URL = process.env.MINI_APP_URL || 'https://poputki.online';
   const BACKEND_API_URL = process.env.BACKEND_API_URL || 'https://poputki-backend.onrender.com/api';
-  const SUPABASE_URL = 'https://xzvtjcqwmuezxyeerkki.supabase.co';
-  const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inh6dnRqY3F3bXVlenh5ZWVya2tpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzMxMjA0MTEsImV4cCI6MjA4ODY5NjQxMX0.My0BKDF4tC9egh1nZbs9G0U7KKvwJixIuo71wuPPFDo';
+  const SUPABASE_URL = process.env.SUPABASE_URL;
+  const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
 
   const log = (msg, data = null) => {
     const timestamp = new Date().toISOString();
