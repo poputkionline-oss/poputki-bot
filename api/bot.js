@@ -836,6 +836,15 @@ Set is_spam to true ONLY if confidence is "high". For anything uncertain, set is
 
           if (param.startsWith('ride_')) {
             const rideId = param.replace('ride_', '');
+            // Check if rideId is a valid number
+            if (!/^\d+$/.test(rideId)) {
+              await safeSendMessage({
+                chat_id: chatId,
+                text: "😔 Неверный формат ссылки на поездку."
+              });
+              return res.status(200).json({ ok: true });
+            }
+
             try {
               const rideUrl = `${SUPABASE_URL}/rest/v1/rides?id=eq.${rideId}&select=*`;
               const rideResponse = await fetch(rideUrl, {
@@ -845,7 +854,10 @@ Set is_spam to true ONLY if confidence is "high". For anything uncertain, set is
                 }
               });
 
-              if (!rideResponse.ok) throw new Error(`Supabase error: ${rideResponse.status}`);
+              if (!rideResponse.ok) {
+                const errorText = await rideResponse.text();
+                throw new Error(`Supabase error ${rideResponse.status}: ${errorText}`);
+              }
 
               const rideDataArray = await rideResponse.json();
               const ride = Array.isArray(rideDataArray) ? rideDataArray[0] : null;
@@ -892,6 +904,15 @@ Set is_spam to true ONLY if confidence is "high". For anything uncertain, set is
 
           if (param.startsWith('bus_')) {
             const busId = param.replace('bus_', '');
+            // Check if busId is a valid number
+            if (!/^\d+$/.test(busId)) {
+              await safeSendMessage({
+                chat_id: chatId,
+                text: "😔 Неверный формат ссылки на билет."
+              });
+              return res.status(200).json({ ok: true });
+            }
+
             try {
               const busUrl = `${SUPABASE_URL}/rest/v1/bus_tickets?id=eq.${busId}&select=*`;
               const busResponse = await fetch(busUrl, {
@@ -901,7 +922,10 @@ Set is_spam to true ONLY if confidence is "high". For anything uncertain, set is
                 }
               });
 
-              if (!busResponse.ok) throw new Error(`Supabase error: ${busResponse.status}`);
+              if (!busResponse.ok) {
+                const errorText = await busResponse.text();
+                throw new Error(`Supabase error ${busResponse.status}: ${errorText}`);
+              }
 
               const busDataArray = await busResponse.json();
               const bus = Array.isArray(busDataArray) ? busDataArray[0] : null;
