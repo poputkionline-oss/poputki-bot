@@ -896,7 +896,7 @@ Set is_spam to true ONLY if confidence is "high". For anything uncertain, set is
               log('Fetch ride error:', e);
               await safeSendMessage({
                 chat_id: chatId,
-                text: "😔 Ошибка при поиске поездки."
+                text: `😔 Ошибка при поиске поездки: ${e.message}`
               });
               return res.status(200).json({ ok: true });
             }
@@ -962,7 +962,7 @@ Set is_spam to true ONLY if confidence is "high". For anything uncertain, set is
               log('Fetch bus error:', e);
               await safeSendMessage({
                 chat_id: chatId,
-                text: "😔 Ошибка при поиске билета."
+                text: `😔 Ошибка при поиске билета: ${e.message}`
               });
               return res.status(200).json({ ok: true });
             }
