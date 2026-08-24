@@ -903,7 +903,11 @@ Set is_spam to true ONLY if confidence is "high". For anything uncertain, set is
           }
 
           if (param.startsWith('bus_')) {
-            const busId = param.replace('bus_', '');
+            const raw = param.replace('bus_', '');
+            const parts = raw.split('_');
+            const busId = parts[0];
+            const refToken = parts.slice(1).join('_');
+
             // Check if busId is a valid number
             if (!/^\d+$/.test(busId)) {
               await safeSendMessage({
@@ -942,12 +946,18 @@ Set is_spam to true ONLY if confidence is "high". For anything uncertain, set is
 
                 const msg = `🚌 <b>АВТОБУСНЫЙ РЕЙС</b>\n\n📍 <b>Маршрут:</b> ${fromCity} ➡ ${toCity}${stopsText}\n🗓 <b>Дата:</b> ${dateStr}\n⏰ <b>Время:</b> ${timeStr}\n💰 <b>Цена:</b> ${bus.price} сом\n🏢 <b>Перевозчик:</b> ${company}`;
 
+                let appUrl = `${MINI_APP_URL}/bus-ticket/${busId}`;
+                if (refToken) {
+                  const cleanRef = refToken.replace(/^[cr]_?/, '');
+                  appUrl += `?source=carrier_link&ref=c_${cleanRef}&channel=telegram`;
+                }
+
                 await safeSendMessage({
                   chat_id: chatId,
                   text: msg,
                   parse_mode: "HTML",
                   reply_markup: {
-                    inline_keyboard: [[{ text: "🚀 Открыть билет", web_app: { url: `${MINI_APP_URL}/bus-ticket/${busId}` } }]]
+                    inline_keyboard: [[{ text: "🚀 Открыть билет", web_app: { url: appUrl } }]]
                   }
                 });
                 return res.status(200).json({ ok: true });
