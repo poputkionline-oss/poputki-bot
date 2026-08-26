@@ -103,7 +103,7 @@ export default async function handler(req, res) {
   };
 
   // Claude API Configuration & Helpers
-  const CLAUDE_API_KEY = 'sk-ant-api' + '03-9FLz1jE2fAyUBZV04bnB6sWNJN8q4Mm57W-MR3vNhKqZZHIFgDN7E1998BDJi1mQpT3KBwz3e5mRwsWVyG4c6w-T4YtJAAA';
+  const CLAUDE_API_KEY = process.env.CLAUDE_API_KEY;
 
   const syncGroup = async (cid, title) => {
     try {
@@ -131,6 +131,10 @@ export default async function handler(req, res) {
 
   const parseMessageWithClaude = async (text) => {
     try {
+      if (!CLAUDE_API_KEY) {
+        log('Claude API Key is not configured in environment variables. Skipping AI parsing.');
+        return {};
+      }
       log('Sending message to Claude API...');
       const today = new Date();
       // Get Tajik/Dushanbe local time offset (typically UTC+5)
@@ -235,6 +239,10 @@ JSON Keys:
 
   const checkSpamWithClaude = async (text) => {
     try {
+      if (!CLAUDE_API_KEY) {
+        log('Claude API Key is not configured in environment variables. Skipping spam check.');
+        return { is_spam: false, spam_type: 'normal', confidence: 'low', reason: 'Claude API key not configured' };
+      }
       log('Checking message for spam with Claude...');
       const systemPrompt = `You are a moderation system for a ride-sharing Telegram group in Tajikistan. The group language is Russian and Tajik.
 
