@@ -9,7 +9,8 @@ function getConfig() {
     backendApiUrl: (process.env.BACKEND_API_URL || 'https://poputki-backend-9dv6.onrender.com/api').replace(/\/$/, ''),
     claimSecret: process.env.CLAIM_BOT_SHARED_SECRET,
     supabaseUrl: process.env.SUPABASE_URL,
-    supabaseAnonKey: process.env.SUPABASE_ANON_KEY
+    supabaseAnonKey: process.env.SUPABASE_ANON_KEY,
+    miniAppUrl: (process.env.MINI_APP_URL || 'https://poputki.online').replace(/\/$/, '')
   };
 }
 
@@ -183,7 +184,7 @@ async function handleClaimStart(message, rawToken) {
 }
 
 async function handleClaimContact(message, state) {
-  const { botToken } = getConfig();
+  const { botToken, miniAppUrl } = getConfig();
   const chatId = message.chat.id;
   const contact = message.contact;
   const sender = message.from;
@@ -228,7 +229,11 @@ async function handleClaimContact(message, state) {
       await sendMessage(botToken, {
         chat_id: chatId,
         text: '✅ Готово. Билет подтверждён в вашем Telegram. Теперь поездка будет отображаться в ваших поездках, а важные уведомления будут приходить сюда.',
-        reply_markup: { remove_keyboard: true }
+        reply_markup: {
+          inline_keyboard: [[
+            { text: '🎫 Мои поездки', web_app: { url: `${miniAppUrl}/my-bus-tickets` } }
+          ]]
+        }
       });
       return;
     }
@@ -236,7 +241,11 @@ async function handleClaimContact(message, state) {
     await sendMessage(botToken, {
       chat_id: chatId,
       text: '✅ Номер получен. Запрос на подтверждение билета передан диспетчеру рейса. Билет остаётся действительным для посадки.',
-      reply_markup: { remove_keyboard: true }
+      reply_markup: {
+        inline_keyboard: [[
+          { text: '🎫 Мои поездки', web_app: { url: `${miniAppUrl}/my-bus-tickets` } }
+        ]]
+      }
     });
   } catch (error) {
     const terminalCodes = new Set([
