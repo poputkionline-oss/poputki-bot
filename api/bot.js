@@ -431,7 +431,7 @@ Set is_spam to true ONLY if confidence is "high". For anything uncertain, set is
 
       log(`[Scraper] Calling backend API to publish ride: ${BACKEND_API_URL}/rides`);
 
-      const botServiceToken = process.env.BOT_SERVICE_TOKEN || process.env.BOT_TOKEN;
+      const botServiceToken = process.env.BOT_SERVICE_TOKEN;
       const backendResponse = await fetch(`${BACKEND_API_URL}/rides`, {
         method: 'POST',
         headers: {
