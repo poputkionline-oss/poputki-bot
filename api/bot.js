@@ -436,7 +436,6 @@ Set is_spam to true ONLY if confidence is "high". For anything uncertain, set is
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-mana-man': 'nasa.2006',
           ...(botServiceToken ? { 'X-Bot-Service-Token': botServiceToken } : {})
         },
         body: JSON.stringify(rideData)
