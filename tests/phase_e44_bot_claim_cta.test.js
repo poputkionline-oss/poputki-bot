@@ -20,12 +20,15 @@ describe('PHASE E.44 — BOT CLAIM CTA AUDIT & INLINE BUTTON TESTS', () => {
     });
 
     it('3. Pending verification message includes [ 🎫 Мои поездки ] inline button targeting /my-bus-tickets', () => {
-        assert.ok(content.includes('text: \'✅ Номер получен. Запрос на подтверждение билета передан диспетчеру рейса. Билет остаётся действительным для посадки.\''));
+        // Phase E.45.2: default pending text now lives in the pendingText ternary
+        assert.ok(content.includes('✅ Номер получен. Запрос на подтверждение билета передан диспетчеру рейса. Билет остаётся действительным для посадки.'));
+        assert.ok(content.includes('text: pendingText,'));
         assert.ok(content.includes('{ text: \'🎫 Мои поездки\', web_app: { url: `${miniAppUrl}/my-bus-tickets` } }'));
     });
 
     it('4. Claimed confirmation message includes [ 🎫 Мои поездки ] inline button targeting /my-bus-tickets', () => {
-        assert.ok(content.includes('text: \'✅ Готово. Билет подтверждён в вашем Telegram. Теперь поездка будет отображаться в ваших поездках, а важные уведомления будут приходить сюда.\''));
+        // Phase E.45.2: updated success copy
+        assert.ok(content.includes('text: \'✅ Номер подтверждён.\\n\\nБилет успешно добавлен в ваши поездки.\''));
         assert.ok(content.includes('{ text: \'🎫 Мои поездки\', web_app: { url: `${miniAppUrl}/my-bus-tickets` } }'));
     });
 

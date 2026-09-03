@@ -228,7 +228,7 @@ async function handleClaimContact(message, state) {
     if (result.status === 'claimed') {
       await sendMessage(botToken, {
         chat_id: chatId,
-        text: '✅ Готово. Билет подтверждён в вашем Telegram. Теперь поездка будет отображаться в ваших поездках, а важные уведомления будут приходить сюда.',
+        text: '✅ Номер подтверждён.\n\nБилет успешно добавлен в ваши поездки.',
         reply_markup: {
           inline_keyboard: [[
             { text: '🎫 Мои поездки', web_app: { url: `${miniAppUrl}/my-bus-tickets` } }
@@ -238,9 +238,13 @@ async function handleClaimContact(message, state) {
       return;
     }
 
+    const pendingText = result.reason === 'PHONE_MISMATCH_REQUIRES_APPROVAL'
+      ? '⚠️ Отправленный номер не совпадает с номером в билете. Запрос на подтверждение передан диспетчеру рейса для проверки. Билет остаётся действительным для посадки.'
+      : '✅ Номер получен. Запрос на подтверждение билета передан диспетчеру рейса. Билет остаётся действительным для посадки.';
+
     await sendMessage(botToken, {
       chat_id: chatId,
-      text: '✅ Номер получен. Запрос на подтверждение билета передан диспетчеру рейса. Билет остаётся действительным для посадки.',
+      text: pendingText,
       reply_markup: {
         inline_keyboard: [[
           { text: '🎫 Мои поездки', web_app: { url: `${miniAppUrl}/my-bus-tickets` } }
