@@ -15,7 +15,11 @@ function getConfig() {
   return {
     botToken: process.env.BOT_TOKEN,
     backendApiUrl: (process.env.BACKEND_API_URL || 'https://poputki-backend-9dv6.onrender.com/api').replace(/\/$/, ''),
-    claimSecret: process.env.CLAIM_BOT_SHARED_SECRET || process.env.INTERNAL_SERVICE_SECRET || process.env.BOT_TOKEN,
+    // Phase P.1G.3A: CLAIM_BOT_SHARED_SECRET only — this is a distinct
+    // secret from INTERNAL_SERVICE_SECRET (used by signedBackendClient.js
+    // for the separate HMAC-signed acquisition-funnel calls) and from
+    // BOT_TOKEN. No cross-fallback between them.
+    claimSecret: process.env.CLAIM_BOT_SHARED_SECRET,
     supabaseUrl: process.env.SUPABASE_URL,
     supabaseAnonKey: process.env.SUPABASE_ANON_KEY,
     miniAppUrl: (process.env.MINI_APP_URL || 'https://poputki.online').replace(/\/$/, '')
@@ -330,6 +334,12 @@ export default async function handler(req, res) {
       await handleGenericStart(message);
       return res.status(200).json({ ok: true });
     }
+
+    // parsed.type === 'ride' | 'bus': deliberately not handled here. They
+    // are valid:true (see deepLinkParser.js), so control falls through this
+    // block to baseHandler(req, res) below, which owns the actual ride/bus
+    // deep-link logic (including carrier-ref-token support). Do not add a
+    // branch here — that would process the same payload twice.
   }
 
   // 2. Process Contact Sharing

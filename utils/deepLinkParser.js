@@ -74,12 +74,20 @@ export function parseDeepLink(text) {
     }
 
     // 5. Ride deep link: ride_<id>
+    // Phase P.1G.3A: intentionally NOT dispatched by api/bot-claim.js's own
+    // handler table below — ride_/bus_ are recognized here only so they are
+    // classified valid:true (preventing them from being misrouted into the
+    // generic-start fallback) and are then handled by the pre-existing,
+    // already-correct legacy logic in api/bot.js (which additionally
+    // supports carrier-ref-token suffixes this parser does not model).
+    // Do not add a ride/bus branch to bot-claim.js's dispatcher — that would
+    // process the same /start payload twice.
     const rideMatch = payload.match(/^ride_([0-9]+)$/i);
     if (rideMatch) {
         return { type: 'ride', id: rideMatch[1], valid: true };
     }
 
-    // 6. Bus deep link: bus_<id>
+    // 6. Bus deep link: bus_<id> — see note above.
     const busMatch = payload.match(/^bus_([0-9]+(?:_c[0-9]+)?)$/i);
     if (busMatch) {
         return { type: 'bus', id: busMatch[1], valid: true };
