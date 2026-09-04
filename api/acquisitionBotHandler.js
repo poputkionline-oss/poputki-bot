@@ -8,10 +8,19 @@ import { signedBackendPost } from '../utils/signedBackendClient.js';
 
 const TELEGRAM_API = 'https://api.telegram.org';
 
+// The primary /start CTA opens the bus search screen directly (tab=bus is
+// the allowlisted deep-link value SearchResultsView.vue already supports),
+// instead of the bare Mini App root. Fallback-safe: passed as a Telegram
+// WebAppInfo url (an HTTPS Mini App URL), never a plain `url` button field.
+const BUS_SEARCH_PATH = '/search?tab=bus';
+const START_BUTTON_TEXT = '🚌 Найти билет на автобус';
+
 function getConfig() {
+  const miniAppUrl = (process.env.MINI_APP_URL || 'https://poputki.online').replace(/\/$/, '');
   return {
     botToken: process.env.BOT_TOKEN,
-    miniAppUrl: (process.env.MINI_APP_URL || 'https://poputki.online').replace(/\/$/, '')
+    miniAppUrl,
+    busSearchUrl: `${miniAppUrl}${BUS_SEARCH_PATH}`
   };
 }
 
@@ -30,7 +39,7 @@ async function sendMessage(botToken, payload) {
 }
 
 export async function handleWebHandshake(message, rawToken) {
-  const { botToken, miniAppUrl } = getConfig();
+  const { botToken, busSearchUrl } = getConfig();
   const chatId = message.chat.id;
   const sender = message.from;
 
@@ -47,7 +56,9 @@ export async function handleWebHandshake(message, rawToken) {
       'Добро пожаловать!',
       'Ваш аккаунт успешно подключен к сайту.',
       '',
-      'Теперь вы можете бронировать поездки, покупать электронные билеты и получать важные уведомления прямо в Telegram.'
+      'Теперь вы можете бронировать поездки, покупать электронные билеты и получать важные уведомления прямо в Telegram.',
+      '',
+      `Если кнопка ниже не открывается: ${busSearchUrl}`
     ].join('\n');
 
     await sendMessage(botToken, {
@@ -55,14 +66,16 @@ export async function handleWebHandshake(message, rawToken) {
       text,
       reply_markup: {
         inline_keyboard: [[
-          { text: '🚗 Открыть POPUTKI.ONLINE', web_app: { url: miniAppUrl } }
+          { text: START_BUTTON_TEXT, web_app: { url: busSearchUrl } }
         ]]
       }
     });
   } catch (error) {
     const text = [
       'Ссылка для подключения уже использована или срок её действия истёк.',
-      'Вы можете открыть POPUTKI.ONLINE прямо сейчас кнопкой ниже:'
+      'Вы можете открыть POPUTKI.ONLINE прямо сейчас кнопкой ниже:',
+      '',
+      `Если кнопка ниже не открывается: ${busSearchUrl}`
     ].join('\n');
 
     await sendMessage(botToken, {
@@ -70,7 +83,7 @@ export async function handleWebHandshake(message, rawToken) {
       text,
       reply_markup: {
         inline_keyboard: [[
-          { text: '🚗 Открыть POPUTKI.ONLINE', web_app: { url: miniAppUrl } }
+          { text: START_BUTTON_TEXT, web_app: { url: busSearchUrl } }
         ]]
       }
     });
@@ -109,7 +122,7 @@ export async function handleReferralStart(message, code) {
 }
 
 export async function handleGenericStart(message) {
-  const { botToken, miniAppUrl } = getConfig();
+  const { botToken, miniAppUrl, busSearchUrl } = getConfig();
   const chatId = message.chat.id;
   const sender = message.from;
 
@@ -126,7 +139,9 @@ export async function handleGenericStart(message) {
     '',
     'Официальный сервис междугородних поездок и электронных билетов на автобус в Таджикистане.',
     '',
-    'Выберите нужное действие:'
+    'Выберите нужное действие:',
+    '',
+    `Если кнопка ниже не открывается: ${busSearchUrl}`
   ].join('\n');
 
   await sendMessage(botToken, {
@@ -134,7 +149,7 @@ export async function handleGenericStart(message) {
     text,
     reply_markup: {
       inline_keyboard: [
-        [{ text: '🚗 Открыть POPUTKI.ONLINE', web_app: { url: miniAppUrl } }],
+        [{ text: START_BUTTON_TEXT, web_app: { url: busSearchUrl } }],
         [{ text: '🎫 Мои билеты', web_app: { url: `${miniAppUrl}/my-bus-tickets` } }]
       ]
     }
@@ -142,7 +157,7 @@ export async function handleGenericStart(message) {
 }
 
 export async function handleGenericContact(message) {
-  const { botToken, miniAppUrl } = getConfig();
+  const { botToken, busSearchUrl } = getConfig();
   const contact = message.contact;
   const sender = message.from;
 
@@ -157,7 +172,7 @@ export async function handleGenericContact(message) {
       text: '✅ Ваш номер успешно сохранён в POPUTKI.ONLINE.\n\nТеперь вы можете бронировать поездки и билеты.',
       reply_markup: {
         inline_keyboard: [[
-          { text: '🚗 Открыть POPUTKI.ONLINE', web_app: { url: miniAppUrl } }
+          { text: START_BUTTON_TEXT, web_app: { url: busSearchUrl } }
         ]]
       }
     });
