@@ -10,15 +10,19 @@
 import crypto from 'crypto';
 
 /**
- * Returns configured internal secret for bot -> backend communication.
+ * Returns the configured internal secret for bot -> backend HMAC calls.
+ *
+ * Phase P.1G.3A: no fallback to CLAIM_BOT_SHARED_SECRET or BOT_TOKEN — those
+ * are separate secrets for separate concerns (the ticket-claim flow's
+ * X-Claim-Bot-Secret header, and the raw Telegram bot token). Reusing either
+ * here would mean a leak of one secret compromises both mechanisms. If
+ * INTERNAL_SERVICE_SECRET is not set, signing fails closed (see
+ * createSignedHeaders below).
  *
  * @returns {string|null}
  */
 export function getBotSharedSecret() {
-    return process.env.INTERNAL_SERVICE_SECRET ||
-           process.env.CLAIM_BOT_SHARED_SECRET ||
-           process.env.BOT_TOKEN ||
-           null;
+    return process.env.INTERNAL_SERVICE_SECRET || null;
 }
 
 /**
