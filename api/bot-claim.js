@@ -1,4 +1,12 @@
 import baseHandler from './bot.js';
+import { parseDeepLink } from '../utils/deepLinkParser.js';
+import { signedBackendPost } from '../utils/signedBackendClient.js';
+import {
+  handleWebHandshake,
+  handleReferralStart,
+  handleGenericStart,
+  handleGenericContact
+} from './acquisitionBotHandler.js';
 
 const TELEGRAM_API = 'https://api.telegram.org';
 const CLAIM_STATE = 'waiting_for_ticket_claim_contact';
@@ -7,7 +15,7 @@ function getConfig() {
   return {
     botToken: process.env.BOT_TOKEN,
     backendApiUrl: (process.env.BACKEND_API_URL || 'https://poputki-backend-9dv6.onrender.com/api').replace(/\/$/, ''),
-    claimSecret: process.env.CLAIM_BOT_SHARED_SECRET,
+    claimSecret: process.env.CLAIM_BOT_SHARED_SECRET || process.env.INTERNAL_SERVICE_SECRET || process.env.BOT_TOKEN,
     supabaseUrl: process.env.SUPABASE_URL,
     supabaseAnonKey: process.env.SUPABASE_ANON_KEY,
     miniAppUrl: (process.env.MINI_APP_URL || 'https://poputki.online').replace(/\/$/, '')
@@ -133,7 +141,7 @@ async function handleClaimStart(message, rawToken) {
   const { botToken } = getConfig();
   const chatId = message.chat.id;
 
-  if (!/^[a-f0-9]{32}$/i.test(rawToken || '')) {
+  if (!/^[a-f0-9]{32,64}$/i.test(rawToken || '')) {
     await sendMessage(botToken, {
       chat_id: chatId,
       text: 'Ссылка на билет недействительна или повреждена. Откройте Telegram снова из электронного билета.'
@@ -225,6 +233,12 @@ async function handleClaimContact(message, state) {
 
     await clearClaimState(chatId).catch(() => {});
 
+    // Notify acquisition funnel of verified contact sharing (zero consent granted)
+    signedBackendPost('/api/internal/acquisition/contact-shared', {
+      telegram_user_id: sender.id,
+      telegram_chat_id: chatId
+    }).catch(() => {});
+
     if (result.status === 'claimed') {
       await sendMessage(botToken, {
         chat_id: chatId,
@@ -291,20 +305,44 @@ export default async function handler(req, res) {
     return baseHandler(req, res);
   }
 
-  const text = message.text || '';
-  const startMatch = text.match(/^\/start\s+claim_([a-f0-9]{32})$/i);
+  const text = message?.text || '';
 
-  if (startMatch) {
-    await handleClaimStart(message, startMatch[1]);
-    return res.status(200).json({ ok: true });
+  // 1. Process /start commands with allowlist deep link parser
+  if (text.startsWith('/start')) {
+    const parsed = parseDeepLink(text);
+
+    if (parsed.type === 'w') {
+      await handleWebHandshake(message, parsed.token);
+      return res.status(200).json({ ok: true });
+    }
+
+    if (parsed.type === 'claim' || parsed.type === 's') {
+      await handleClaimStart(message, parsed.token);
+      return res.status(200).json({ ok: true });
+    }
+
+    if (parsed.type === 'ref') {
+      await handleReferralStart(message, parsed.code);
+      return res.status(200).json({ ok: true });
+    }
+
+    if (parsed.type === 'empty' || !parsed.valid) {
+      await handleGenericStart(message);
+      return res.status(200).json({ ok: true });
+    }
   }
 
-  if (message.contact) {
+  // 2. Process Contact Sharing
+  if (message?.contact) {
     const state = await getClaimState(message.chat.id).catch(() => null);
     if (state?.state === CLAIM_STATE) {
       await handleClaimContact(message, state);
       return res.status(200).json({ ok: true });
     }
+
+    // Generic contact sharing outside ticket claim
+    await handleGenericContact(message);
+    return res.status(200).json({ ok: true });
   }
 
   return baseHandler(req, res);
