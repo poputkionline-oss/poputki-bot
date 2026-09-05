@@ -9,17 +9,17 @@
  * Requirements:
  * - Feature flag AI_ASSISTANT_ENABLED (default false)
  * - Pilot whitelist support (AI_PILOT_WHITELIST)
- * - Strict timeout via AbortController (default 8000ms)
+ * - Strict timeout via AbortController (default 15000ms)
  * - Idempotency request_id derived from Telegram update_id
  * - Zero secrets or PII leakage in logs
  */
 
-function getConfig() {
+export function getConfig() {
   return {
     enabled: process.env.AI_ASSISTANT_ENABLED === 'true',
     endpoint: process.env.AI_ASSISTANT_ENDPOINT || (process.env.SUPABASE_URL ? `${process.env.SUPABASE_URL.replace(/\/$/, '')}/functions/v1/assistant-chat` : ''),
     sharedSecret: process.env.INTERNAL_BOT_ASSISTANT_SECRET || null,
-    timeoutMs: Number(process.env.AI_REQUEST_TIMEOUT_MS) || 8000,
+    timeoutMs: Number(process.env.AI_REQUEST_TIMEOUT_MS) || 15000,
     whitelist: (process.env.AI_PILOT_WHITELIST || '')
       .split(',')
       .map(id => id.trim())
