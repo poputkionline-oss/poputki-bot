@@ -85,11 +85,21 @@ export async function callAssistantChat({ updateId, telegramId, chatId, message 
       signal: controller.signal
     });
 
+    // Safely parse response JSON body once
+    const data = await response.json().catch(() => null);
+
     if (!response.ok) {
+      if (response.status === 429) {
+        if (data?.error === 'RATE_LIMITED_DAILY') {
+          return { ok: false, fallback: true, reason: 'RATE_LIMITED_DAILY' };
+        }
+        if (data?.error === 'RATE_LIMITED_GLOBAL_STOP_LOSS' || data?.error === 'RATE_LIMITED_GLOBAL') {
+          return { ok: false, fallback: true, reason: 'RATE_LIMITED_GLOBAL' };
+        }
+      }
       return { ok: false, fallback: true, reason: `HTTP_${response.status}` };
     }
 
-    const data = await response.json().catch(() => null);
     if (!data?.ok || !data?.reply) {
       return { ok: false, fallback: true, reason: data?.error || 'INVALID_RESPONSE' };
     }

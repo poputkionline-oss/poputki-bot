@@ -360,3 +360,49 @@ export function formatAiAssistantResponse({ userMessage, reply, trips, miniAppUr
     lang
   };
 }
+
+export const RATE_LIMIT_MESSAGES = {
+  daily: {
+    ru: 'Вы использовали дневной лимит AI-помощника — 5 запросов из 5. Найдите поездку в приложении или попробуйте снова завтра.',
+    tj: 'Шумо меъёри шабонарӯзии ёрдамчии AI — 5 дархост аз 5-ро истифода бурдед. Сафарро дар замима ҷустуҷӯ кунед ё фардо дубора кӯшиш намоед.',
+    uz: 'Siz AI-yordamchining kunlik limitidan — 5 ta so‘rovdan 5 tasini ishlatdingiz. Safarni ilovadan qidiring yoki ertaga qayta urinib ko‘ring.'
+  },
+  global: {
+    ru: 'AI-помощник временно достиг общего лимита запросов. Воспользуйтесь поиском в приложении или попробуйте позже.',
+    tj: 'Ёрдамчии AI муваққатан ба меъёри умумии дархостҳо расид. Аз ҷустуҷӯи замима истифода баред ё баъдтар кӯшиш намоед.',
+    uz: 'AI-yordamchi vaqtincha umumiy so‘rovlar limitiga yetdi. Ilovadagi qidiruvdan foydalaning yoki keyinroq urinib ko‘ring.'
+  },
+  searchBtn: {
+    ru: '🔍 Найти поездку в приложении',
+    tj: '🔍 Ҷустуҷӯи сафар дар замима',
+    uz: '🔍 Ilovada safar qidirish'
+  }
+};
+
+/**
+ * Formats rate limit fallback responses deterministically without calling Claude.
+ *
+ * @param {Object} params
+ * @param {string} params.userMessage Current incoming user message for language detection
+ * @param {'RATE_LIMITED_DAILY' | 'RATE_LIMITED_GLOBAL'} params.reason
+ * @param {string} params.miniAppUrl Base URL for Mini App
+ * @returns {{ text: string, inlineKeyboard: Array<Array<any>>, lang: string }}
+ */
+export function formatAiRateLimitResponse({ userMessage, reason, miniAppUrl = 'https://poputki.online' }) {
+  const lang = detectLanguage(userMessage);
+  const isDaily = reason === 'RATE_LIMITED_DAILY';
+  const category = isDaily ? RATE_LIMIT_MESSAGES.daily : RATE_LIMIT_MESSAGES.global;
+  const text = category[lang] || category.ru;
+  const btnText = RATE_LIMIT_MESSAGES.searchBtn[lang] || RATE_LIMIT_MESSAGES.searchBtn.ru;
+  const baseAppUrl = miniAppUrl.replace(/\/$/, '');
+  const searchUrl = `${baseAppUrl}/search`;
+
+  return {
+    text,
+    inlineKeyboard: [
+      [{ text: btnText, web_app: { url: searchUrl } }]
+    ],
+    lang
+  };
+}
+

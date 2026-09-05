@@ -1,6 +1,8 @@
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert';
 import { callAssistantChat, getConfig } from '../utils/assistantChatClient.js';
+import { formatAiRateLimitResponse, RATE_LIMIT_MESSAGES } from '../utils/aiResponseFormatter.js';
+import handler from '../api/bot.js';
 
 describe('PHASE AI SECURITY HOTFIX — Telegram Bot AI Assistant Client', () => {
   const originalEnv = { ...process.env };
@@ -307,6 +309,283 @@ describe('PHASE AI SECURITY HOTFIX — Telegram Bot AI Assistant Client', () => 
       assert.strictEqual(res.fallback, true);
       assert.strictEqual(res.reason, 'NOT_IN_WHITELIST');
       assert.strictEqual(fetchCalled, false, 'Edge Function must not be called');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('12. HTTP 429 + RATE_LIMITED_DAILY returns exact safe reason RATE_LIMITED_DAILY', async () => {
+    process.env.AI_ASSISTANT_ENABLED = 'true';
+    process.env.AI_ASSISTANT_ENDPOINT = 'https://test-api.supabase.co/functions/v1/assistant-chat';
+    process.env.INTERNAL_BOT_ASSISTANT_SECRET = 'secret_test_key_12345';
+    process.env.AI_PILOT_WHITELIST = '777001';
+
+    const originalFetch = globalThis.fetch;
+    let callCount = 0;
+    globalThis.fetch = async () => {
+      callCount++;
+      return new Response(JSON.stringify({ error: 'RATE_LIMITED_DAILY', status: 'RATE_LIMITED' }), {
+        status: 429,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    };
+
+    try {
+      const res = await callAssistantChat({
+        updateId: 999201,
+        telegramId: 777001,
+        chatId: 777001,
+        message: 'Рейс в Худжанд'
+      });
+
+      assert.strictEqual(res.ok, false);
+      assert.strictEqual(res.fallback, true);
+      assert.strictEqual(res.reason, 'RATE_LIMITED_DAILY');
+      assert.strictEqual(callCount, 1, 'Must make strictly 1 fetch call');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('13. HTTP 429 + RATE_LIMITED_GLOBAL returns exact safe reason RATE_LIMITED_GLOBAL', async () => {
+    process.env.AI_ASSISTANT_ENABLED = 'true';
+    process.env.AI_ASSISTANT_ENDPOINT = 'https://test-api.supabase.co/functions/v1/assistant-chat';
+    process.env.INTERNAL_BOT_ASSISTANT_SECRET = 'secret_test_key_12345';
+    process.env.AI_PILOT_WHITELIST = '777001';
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => {
+      return new Response(JSON.stringify({ error: 'RATE_LIMITED_GLOBAL_STOP_LOSS', status: 'GLOBAL_LIMIT_EXCEEDED' }), {
+        status: 429,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    };
+
+    try {
+      const res = await callAssistantChat({
+        updateId: 999202,
+        telegramId: 777001,
+        chatId: 777001,
+        message: 'Рейс в Худжанд'
+      });
+
+      assert.strictEqual(res.ok, false);
+      assert.strictEqual(res.fallback, true);
+      assert.strictEqual(res.reason, 'RATE_LIMITED_GLOBAL');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('14. HTTP 429 with empty or non-JSON body safely falls back to HTTP_429', async () => {
+    process.env.AI_ASSISTANT_ENABLED = 'true';
+    process.env.AI_ASSISTANT_ENDPOINT = 'https://test-api.supabase.co/functions/v1/assistant-chat';
+    process.env.INTERNAL_BOT_ASSISTANT_SECRET = 'secret_test_key_12345';
+    process.env.AI_PILOT_WHITELIST = '777001';
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => {
+      return new Response('Too Many Requests', {
+        status: 429,
+        headers: { 'Content-Type': 'text/plain' }
+      });
+    };
+
+    try {
+      const res = await callAssistantChat({
+        updateId: 999203,
+        telegramId: 777001,
+        chatId: 777001,
+        message: 'Рейс в Худжанд'
+      });
+
+      assert.strictEqual(res.ok, false);
+      assert.strictEqual(res.fallback, true);
+      assert.strictEqual(res.reason, 'HTTP_429');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('15. HTTP 500 preserves fail-closed fallback without retries', async () => {
+    process.env.AI_ASSISTANT_ENABLED = 'true';
+    process.env.AI_ASSISTANT_ENDPOINT = 'https://test-api.supabase.co/functions/v1/assistant-chat';
+    process.env.INTERNAL_BOT_ASSISTANT_SECRET = 'secret_test_key_12345';
+    process.env.AI_PILOT_WHITELIST = '777001';
+
+    const originalFetch = globalThis.fetch;
+    let callCount = 0;
+    globalThis.fetch = async () => {
+      callCount++;
+      return new Response(JSON.stringify({ error: 'UPSTREAM_AI_ERROR' }), {
+        status: 500,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    };
+
+    try {
+      const res = await callAssistantChat({
+        updateId: 999204,
+        telegramId: 777001,
+        chatId: 777001,
+        message: 'Рейс в Худжанд'
+      });
+
+      assert.strictEqual(res.ok, false);
+      assert.strictEqual(res.fallback, true);
+      assert.strictEqual(res.reason, 'HTTP_500');
+      assert.strictEqual(callCount, 1, 'Strictly 1 fetch call on 500');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('16. Localized rate limit responses for RU, TJ, UZ (daily & global limits)', () => {
+    // RU Daily
+    const resRuDaily = formatAiRateLimitResponse({
+      userMessage: 'Найди рейс из Душанбе в Худжанд',
+      reason: 'RATE_LIMITED_DAILY',
+      miniAppUrl: 'https://poputki.online'
+    });
+    assert.strictEqual(resRuDaily.lang, 'ru');
+    assert.strictEqual(resRuDaily.text, 'Вы использовали дневной лимит AI-помощника — 5 запросов из 5. Найдите поездку в приложении или попробуйте снова завтра.');
+    assert.strictEqual(resRuDaily.inlineKeyboard[0][0].text, '🔍 Найти поездку в приложении');
+    assert.strictEqual(resRuDaily.inlineKeyboard[0][0].web_app.url, 'https://poputki.online/search');
+
+    // TJ Daily
+    const resTjDaily = formatAiRateLimitResponse({
+      userMessage: 'Аз Душанбе ба Хуҷанд сафар ҳаст',
+      reason: 'RATE_LIMITED_DAILY',
+      miniAppUrl: 'https://poputki.online'
+    });
+    assert.strictEqual(resTjDaily.lang, 'tj');
+    assert.strictEqual(resTjDaily.text, 'Шумо меъёри шабонарӯзии ёрдамчии AI — 5 дархост аз 5-ро истифода бурдед. Сафарро дар замима ҷустуҷӯ кунед ё фардо дубора кӯшиш намоед.');
+    assert.strictEqual(resTjDaily.inlineKeyboard[0][0].text, '🔍 Ҷустуҷӯи сафар дар замима');
+    assert.strictEqual(resTjDaily.inlineKeyboard[0][0].web_app.url, 'https://poputki.online/search');
+
+    // UZ Daily (with exact production string)
+    const resUzDaily = formatAiRateLimitResponse({
+      userMessage: '8-sentabr kuni Dushanbedan Xo‘jandga safar topib bering',
+      reason: 'RATE_LIMITED_DAILY',
+      miniAppUrl: 'https://poputki.online'
+    });
+    assert.strictEqual(resUzDaily.lang, 'uz');
+    assert.strictEqual(resUzDaily.text, 'Siz AI-yordamchining kunlik limitidan — 5 ta so‘rovdan 5 tasini ishlatdingiz. Safarni ilovadan qidiring yoki ertaga qayta urinib ko‘ring.');
+    assert.strictEqual(resUzDaily.inlineKeyboard[0][0].text, '🔍 Ilovada safar qidirish');
+    assert.strictEqual(resUzDaily.inlineKeyboard[0][0].web_app.url, 'https://poputki.online/search');
+
+    // Global limit (RU, TJ, UZ) - must NOT expose internal limit 500
+    const resRuGlobal = formatAiRateLimitResponse({
+      userMessage: 'найди поездку',
+      reason: 'RATE_LIMITED_GLOBAL',
+      miniAppUrl: 'https://poputki.online'
+    });
+    assert.strictEqual(resRuGlobal.text, 'AI-помощник временно достиг общего лимита запросов. Воспользуйтесь поиском в приложении или попробуйте позже.');
+    assert.ok(!resRuGlobal.text.includes('500'), 'Must not disclose internal limit 500');
+
+    const resTjGlobal = formatAiRateLimitResponse({
+      userMessage: 'Аз Душанбе ба Хуҷанд сафар ёбед',
+      reason: 'RATE_LIMITED_GLOBAL',
+      miniAppUrl: 'https://poputki.online'
+    });
+    assert.strictEqual(resTjGlobal.text, 'Ёрдамчии AI муваққатан ба меъёри умумии дархостҳо расид. Аз ҷустуҷӯи замима истифода баред ё баъдтар кӯшиш намоед.');
+    assert.ok(!resTjGlobal.text.includes('500'), 'Must not disclose internal limit 500');
+
+    const resUzGlobal = formatAiRateLimitResponse({
+      userMessage: 'safar topib bering',
+      reason: 'RATE_LIMITED_GLOBAL',
+      miniAppUrl: 'https://poputki.online'
+    });
+    assert.strictEqual(resUzGlobal.text, 'AI-yordamchi vaqtincha umumiy so‘rovlar limitiga yetdi. Ilovadagi qidiruvdan foydalaning yoki keyinroq urinib ko‘ring.');
+    assert.ok(!resUzGlobal.text.includes('500'), 'Must not disclose internal limit 500');
+  });
+
+  it('17. bot.js webhook handler integration: rate limits send localized messages with search button, others fall back', async () => {
+    process.env.BOT_TOKEN = 'mock_bot_token_12345';
+    process.env.AI_ASSISTANT_ENABLED = 'true';
+    process.env.AI_ASSISTANT_ENDPOINT = 'https://test-api.supabase.co/functions/v1/assistant-chat';
+    process.env.INTERNAL_BOT_ASSISTANT_SECRET = 'secret_test_key_12345';
+    process.env.AI_PILOT_WHITELIST = '777001';
+    process.env.MINI_APP_URL = 'https://poputki.online';
+
+    const originalFetch = globalThis.fetch;
+    const sentMessages = [];
+
+    globalThis.fetch = async (url, options) => {
+      const urlStr = String(url);
+      if (urlStr.includes('/sendMessage')) {
+        const body = JSON.parse(options.body);
+        sentMessages.push(body);
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      if (urlStr.includes('assistant-chat')) {
+        return new Response(JSON.stringify({ error: 'RATE_LIMITED_DAILY', status: 'RATE_LIMITED' }), {
+          status: 429,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    };
+
+    try {
+      const createMockRes = () => {
+        const res = {
+          statusCode: 200,
+          body: null,
+          status(code) { res.statusCode = code; return res; },
+          json(obj) { res.body = obj; return res; }
+        };
+        return res;
+      };
+
+      // 1. RU query with RATE_LIMITED_DAILY
+      const reqRu = {
+        method: 'POST',
+        body: {
+          update_id: 10001,
+          message: { chat: { id: 777001, type: 'private' }, from: { id: 777001 }, text: 'Найди поездку в Худжанд' }
+        }
+      };
+      const resRu = createMockRes();
+      await handler(reqRu, resRu);
+      assert.strictEqual(resRu.statusCode, 200);
+      assert.strictEqual(sentMessages.length, 1);
+      assert.ok(sentMessages[0].text.includes('Вы использовали дневной лимит AI-помощника — 5 запросов из 5.'));
+      assert.strictEqual(sentMessages[0].reply_markup.inline_keyboard[0][0].text, '🔍 Найти поездку в приложении');
+      assert.strictEqual(sentMessages[0].reply_markup.inline_keyboard[0][0].web_app.url, 'https://poputki.online/search');
+
+      // 2. UZ query with RATE_LIMITED_DAILY
+      sentMessages.length = 0;
+      const reqUz = {
+        method: 'POST',
+        body: {
+          update_id: 10002,
+          message: { chat: { id: 777001, type: 'private' }, from: { id: 777001 }, text: '8-sentabr kuni Dushanbedan Xo‘jandga safar topib bering' }
+        }
+      };
+      const resUz = createMockRes();
+      await handler(reqUz, resUz);
+      assert.strictEqual(resUz.statusCode, 200);
+      assert.strictEqual(sentMessages.length, 1);
+      assert.ok(sentMessages[0].text.includes('Siz AI-yordamchining kunlik limitidan — 5 ta so‘rovdan 5 tasini ishlatdingiz.'));
+      assert.strictEqual(sentMessages[0].reply_markup.inline_keyboard[0][0].text, '🔍 Ilovada safar qidirish');
+      assert.strictEqual(sentMessages[0].reply_markup.inline_keyboard[0][0].web_app.url, 'https://poputki.online/search');
+
+      // 3. Non-whitelisted user falls through to standard welcome menu (NOT rate limit message)
+      sentMessages.length = 0;
+      const reqNonWhite = {
+        method: 'POST',
+        body: {
+          update_id: 10003,
+          message: { chat: { id: 888002, type: 'private' }, from: { id: 888002 }, text: 'Привет' }
+        }
+      };
+      const resNonWhite = createMockRes();
+      await handler(reqNonWhite, resNonWhite);
+      assert.strictEqual(resNonWhite.statusCode, 200);
+      assert.strictEqual(sentMessages.length, 2, 'Default welcome flow sends menu + welcome text');
+      assert.ok(!sentMessages.some(m => m.text.includes('лимит')), 'Must not send limit message');
+      assert.ok(sentMessages.some(m => m.text.includes('Poputki.online')), 'Sends standard welcome text');
     } finally {
       globalThis.fetch = originalFetch;
     }

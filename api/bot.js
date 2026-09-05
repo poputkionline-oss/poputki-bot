@@ -1,5 +1,5 @@
 import { callAssistantChat } from '../utils/assistantChatClient.js';
-import { formatAiAssistantResponse } from '../utils/aiResponseFormatter.js';
+import { formatAiAssistantResponse, formatAiRateLimitResponse } from '../utils/aiResponseFormatter.js';
 
 const TELEGRAM_API = "https://api.telegram.org";
 const syncedGroups = new Set();
@@ -1013,6 +1013,22 @@ Set is_spam to true ONLY if confidence is "high". For anything uncertain, set is
             chat_id: chatId,
             text: formatted.text.slice(0, 4000),
             reply_markup: { inline_keyboard: formatted.inlineKeyboard }
+          });
+          return res.status(200).json({ ok: true });
+        }
+
+        // Handle specific AI rate limits (daily user limit & global stop-loss) before default fallback
+        if (!aiResult.ok && (aiResult.reason === 'RATE_LIMITED_DAILY' || aiResult.reason === 'RATE_LIMITED_GLOBAL')) {
+          const rateLimitFormatted = formatAiRateLimitResponse({
+            userMessage: text,
+            reason: aiResult.reason,
+            miniAppUrl: MINI_APP_URL
+          });
+
+          await safeSendMessage({
+            chat_id: chatId,
+            text: rateLimitFormatted.text,
+            reply_markup: { inline_keyboard: rateLimitFormatted.inlineKeyboard }
           });
           return res.status(200).json({ ok: true });
         }
