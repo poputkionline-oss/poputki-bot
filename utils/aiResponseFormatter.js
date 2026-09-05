@@ -87,7 +87,13 @@ const LABELS = {
  */
 export function detectLanguage(text) {
   if (!text || typeof text !== 'string') return 'ru';
-  const clean = text.toLowerCase().trim();
+
+  // Normalize apostrophe variations to single standard ASCII quote ' for uniform analysis
+  // U+0027 ('), U+0060 (`), U+02BB (ʻ), U+02BC (ʼ), U+2018 (‘), U+2019 (’)
+  const clean = text
+    .toLowerCase()
+    .replace(/[\u0027\u0060\u02BB\u02BC\u2018\u2019]/g, "'")
+    .trim();
 
   // 1. Tajik specific markers
   // Characters unique to Tajik Cyrillic (not in standard Russian or Uzbek Cyrillic): ӣ, ҷ
@@ -116,12 +122,14 @@ export function detectLanguage(text) {
   }
 
   // 2. Uzbek specific markers
-  // Uzbek Latin apostrophes and words
+  // Uzbek Latin apostrophes, vocabulary, and declensions
   const uzPatterns = [
-    /o['`ʻ]/, /g['`ʻ]/, /\bbor\b/, /\bbormi\b/, /\byo['`ʻ]?q\b/,
+    /o'/, /g'/, /\bbor\b/, /\bbormi\b/, /\byo'?q\b/,
     /\bkerak\b/, /\bjoy\b/, /\bjoylar\b/, /\bhaydovchi\b/, /\bqayerga\b/,
     /\bqachon\b/, /\biltimos\b/, /\breys\b/, /\bchipta\b/, /\bchiptalar\b/,
-    /\btoshkent\b/, /\bsamarqand\b/, /\bxo['`ʻ]jand\b/
+    /\bsafar\b/, /\bkun(i)?\b/, /\b(topib|toping|topish|top)\b/, /\b(bering|ber)\b/,
+    /\b(yanvar|fevral|mart|aprel|may|iyun|iyul|avgust|sentabr|oktabr|noyabr|dekabr)\b/,
+    /\bxo'jand/, /\bdushanbe(dan|ga|da)\b/, /\btoshkent/, /\bsamarqand/
   ];
   for (const pattern of uzPatterns) {
     if (pattern.test(clean)) return 'uz';
@@ -165,7 +173,7 @@ export function formatDate(dateStr, lang = 'ru') {
 }
 
 /**
- * Strips raw Markdown artifacts (###, **, *, `) from a string.
+ * Strips raw Markdown artifacts (###, **, *, `) and standalone horizontal separators from a string.
  *
  * @param {string} text
  * @returns {string}
@@ -173,6 +181,8 @@ export function formatDate(dateStr, lang = 'ru') {
 export function sanitizeMarkdown(text) {
   if (!text || typeof text !== 'string') return '';
   return text
+    // Remove standalone horizontal separator lines (e.g. ---, ___, ===, ———, ───)
+    .replace(/^[ \t]*[-_—─=]{3,}[ \t]*$/gm, '')
     // Remove headers like ### or ## or #
     .replace(/^#{1,6}\s+/gm, '')
     // Remove bold **text** -> text
@@ -190,7 +200,7 @@ export function sanitizeMarkdown(text) {
 
 /**
  * Extracts a clean conversational intro from Claude's response,
- * discarding any hallucinated Markdown cards or duplicate lists.
+ * discarding any hallucinated Markdown cards, duplicate lists, or markdown separators.
  *
  * @param {string} reply
  * @param {'ru' | 'tj' | 'uz'} lang
@@ -207,6 +217,12 @@ export function extractCleanIntro(reply, lang = 'ru') {
   for (const rawLine of lines) {
     const line = rawLine.trim();
     if (!line) continue;
+
+    // Stop at horizontal separator lines (e.g. ---, ___, ===, ———, ───)
+    if (/^[-_—─=]{3,}$/.test(line)) {
+      if (introLines.length > 0) break;
+      continue;
+    }
 
     // Stop at markdown headers or card lines
     if (line.startsWith('#') || line.startsWith('###')) break;

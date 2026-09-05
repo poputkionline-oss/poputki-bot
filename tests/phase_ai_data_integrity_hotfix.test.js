@@ -362,4 +362,134 @@ describe('PHASE AI DATA INTEGRITY HOTFIX — Response Formatter & Language Routi
     assert.ok(!res.text.includes('Свободных мест: 10'), 'Must not display overflow 10');
   });
 
+  it('16. Uzbek language detection handles all 6 apostrophe variations and case declensions', () => {
+    // 3.1 Exact production query
+    const prodQuery = '8-sentabr kuni Dushanbedan Xo\u2018jandga safar topib bering';
+    assert.strictEqual(detectLanguage(prodQuery), 'uz', 'Production Uzbek query must be detected as uz');
+
+    // 3.2 All six apostrophe variations in Xo‘jandga
+    const apostrophes = [
+      { name: 'U+0027 standard ASCII', word: 'Xo\u0027jandga' },
+      { name: 'U+0060 grave accent', word: 'Xo\u0060jandga' },
+      { name: 'U+02BB modifier turned comma', word: 'Xo\u02BBjandga' },
+      { name: 'U+02BC modifier apostrophe', word: 'Xo\u02BCjandga' },
+      { name: 'U+2018 left single quote', word: 'Xo\u2018jandga' },
+      { name: 'U+2019 right single quote', word: 'Xo\u2019jandga' }
+    ];
+
+    for (const { name, word } of apostrophes) {
+      assert.strictEqual(detectLanguage(`safar ${word}`), 'uz', `Apostrophe ${name} must detect as uz`);
+      assert.strictEqual(detectLanguage(word), 'uz', `Single word ${name} must detect as uz`);
+    }
+
+    // 1.3 Case declensions of toponyms
+    assert.strictEqual(detectLanguage('Dushanbedan'), 'uz');
+    assert.strictEqual(detectLanguage('Toshkentga'), 'uz');
+    assert.strictEqual(detectLanguage('Samarqanddan'), 'uz');
+
+    // 1.4 Stable Uzbek markers
+    assert.strictEqual(detectLanguage('safar topib bering'), 'uz');
+    assert.strictEqual(detectLanguage('kuni reys bormi'), 'uz');
+    assert.strictEqual(detectLanguage('sentabr oyi'), 'uz');
+  });
+
+  it('17. Deterministic Uzbek trip card, field names, driver, and buttons', () => {
+    const controlRide1865 = {
+      type: 'carpool',
+      id: 1865,
+      from_city: 'Душанбе',
+      to_city: 'Худжанд',
+      date: '2026-09-08',
+      time: '13:00:00',
+      price: 100,
+      price_somoni: 100,
+      seats: 4,
+      seats_available: 3,
+      driver_name: 'Шахром'
+    };
+
+    const res = formatAiAssistantResponse({
+      userMessage: '8-sentabr kuni Dushanbedan Xo\u2018jandga safar topib bering',
+      reply: 'Topildi! \uD83D\uDE97\n\n---\n\n### \uD83D\uDFE2 Yo\'ldosh: Dushanbe \u2192 Xo\'jand',
+      trips: [controlRide1865],
+      miniAppUrl: 'https://poputki.online'
+    });
+
+    assert.strictEqual(res.lang, 'uz', 'Must format in Uzbek');
+    assert.ok(res.text.includes('🚗 Safar: Душанбе → Худжанд'), 'Must use Uzbek title Safar');
+    assert.ok(res.text.includes('📅 Sana: 8 sentabr 2026, 13:00'), 'Must use Uzbek date formatting');
+    assert.ok(res.text.includes('💰 Narxi: 100 somoni'), 'Must use Uzbek price label and unit');
+    assert.ok(res.text.includes('💺 Bo\'sh joylar: 3'), 'Must display exactly 3 available seats in Uzbek');
+    assert.ok(res.text.includes('👤 Haydovchi: Shahrom') || res.text.includes('👤 Haydovchi: Шахром'), 'Must display driver name with Haydovchi label');
+
+    // Buttons
+    assert.strictEqual(res.inlineKeyboard.length, 2);
+    assert.ok(res.inlineKeyboard[0][0].text.includes('🚗 Safar Душанбе → Худжанд (100 s.)'), 'Button 1 must be Uzbek');
+    assert.ok(res.inlineKeyboard[0][0].web_app.url.endsWith('/ride/1865'), 'Button 1 URL must strictly end with /ride/1865');
+    assert.strictEqual(res.inlineKeyboard[1][0].text, '🔍 Ilovada reys qidirish', 'Button 2 must be Uzbek search CTA');
+    assert.ok(res.inlineKeyboard[1][0].web_app.url.endsWith('/search'), 'Button 2 URL must end with /search');
+  });
+
+  it('18. Strips Markdown separators (---, ___, ===, etc.) from intro and final response', () => {
+    const rawReply = 'Topildi! \uD83D\uDE97\n\n---\n\n### \uD83D\uDFE2 Yo\'ldosh: Dushanbe \u2192 Xo\'jand\n\n\uD83D\uDCC5 **Sana:** 8-sentabr 2026\n\uD83D\uDD50 **Vaqt:** 13:00';
+
+    const intro = extractCleanIntro(rawReply, 'uz');
+    assert.ok(intro.includes('Topildi!'), 'Intro must contain greeting');
+    assert.ok(!intro.includes('---'), 'Intro must not contain ---');
+
+    const trip = {
+      type: 'carpool',
+      id: 1865,
+      from_city: 'Душанбе',
+      to_city: 'Худжанд',
+      date: '2026-09-08',
+      time: '13:00',
+      price: 100,
+      seats_available: 3,
+      driver_name: 'Шахром'
+    };
+
+    const res = formatAiAssistantResponse({
+      userMessage: '8-sentabr kuni Dushanbedan Xo\u2018jandga safar topib bering',
+      reply: rawReply,
+      trips: [trip],
+      miniAppUrl: 'https://poputki.online'
+    });
+
+    assert.ok(!res.text.includes('---'), 'Final text must not contain ---');
+    assert.ok(!res.text.includes('###'), 'Final text must not contain ###');
+    assert.ok(!res.text.includes('**'), 'Final text must not contain **');
+
+    // Test other separator styles in extractCleanIntro and sanitizeMarkdown
+    const separators = ['---', '  ---  ', '___', '===', '———', '───'];
+    for (const sep of separators) {
+      const replyWithSep = `Salom! \uD83D\uDE97\n\n${sep}\n\n### Tafsilotlar`;
+      const cleanIntro = extractCleanIntro(replyWithSep, 'uz');
+      assert.ok(!cleanIntro.includes(sep.trim()), `Intro must strip separator ${sep}`);
+    }
+  });
+
+  it('19. Ordinary hyphens in dates, routes, and sentences are NOT damaged', () => {
+    const sample = 'Sana: 8-sentabr 2026\nYo\'nalish: Душанбе — Худжанд\nIzoh: bir-ikki kishi uchun';
+    const sanitized = sanitizeMarkdown(sample);
+
+    assert.ok(sanitized.includes('8-sentabr'), 'Hyphen in date must be preserved');
+    assert.ok(sanitized.includes('Душанбе — Худжанд'), 'Em-dash in route must be preserved');
+    assert.ok(sanitized.includes('bir-ikki'), 'Hyphen in compound word must be preserved');
+  });
+
+  it('20. Cross-language quality: RU, TJ, and UZ remain isolated without regression', () => {
+    // Russian
+    assert.strictEqual(detectLanguage('найди поездку из Душанбе в Худжанд на 8 сентября'), 'ru');
+    assert.strictEqual(detectLanguage('билет на автобус'), 'ru');
+
+    // Tajik
+    assert.strictEqual(detectLanguage('аз душанбе ба хуҷанд барои 8 сентябр нақлиёт ёбед'), 'tj');
+    assert.strictEqual(detectLanguage('салом алейкум ронанда ҳаст'), 'tj');
+
+    // Uzbek
+    assert.strictEqual(detectLanguage('8-sentabr kuni Dushanbedan Xo‘jandga safar topib bering'), 'uz');
+    assert.strictEqual(detectLanguage('dushanbedan toshkentga mashina bormi'), 'uz');
+  });
+
 });
