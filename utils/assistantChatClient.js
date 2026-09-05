@@ -15,8 +15,10 @@
  */
 
 export function getConfig() {
+  const rawPublic = (process.env.AI_ASSISTANT_PUBLIC_ENABLED || '').trim().toLowerCase();
   return {
     enabled: process.env.AI_ASSISTANT_ENABLED === 'true',
+    publicEnabled: rawPublic === 'true',
     endpoint: process.env.AI_ASSISTANT_ENDPOINT || (process.env.SUPABASE_URL ? `${process.env.SUPABASE_URL.replace(/\/$/, '')}/functions/v1/assistant-chat` : ''),
     sharedSecret: process.env.INTERNAL_BOT_ASSISTANT_SECRET || null,
     timeoutMs: Number(process.env.AI_REQUEST_TIMEOUT_MS) || 15000,
@@ -40,7 +42,7 @@ export function getConfig() {
 export async function callAssistantChat({ updateId, telegramId, chatId, message }) {
   const config = getConfig();
 
-  // 1. Kill-switch check
+  // 1. Kill-switch check (AI_ASSISTANT_ENABLED takes absolute precedence)
   if (!config.enabled) {
     return { ok: false, fallback: true, reason: 'AI_DISABLED' };
   }
@@ -50,13 +52,21 @@ export async function callAssistantChat({ updateId, telegramId, chatId, message 
     return { ok: false, fallback: true, reason: 'SERVICE_UNCONFIGURED' };
   }
 
-  // 3. Pilot Whitelist enforcement
-  const userTid = String(telegramId);
-  if (config.whitelist.length > 0 && !config.whitelist.includes(userTid)) {
+  // 3. Telegram ID validation
+  const userTidStr = String(telegramId ?? '').trim();
+  const userTidNum = Number(userTidStr);
+  const isValidTelegramId = /^\d+$/.test(userTidStr) && Number.isFinite(userTidNum) && userTidNum > 0;
+  if (!isValidTelegramId) {
+    return { ok: false, fallback: true, reason: 'INVALID_TELEGRAM_ID' };
+  }
+
+  // 4. Access admission: Pilot Whitelist OR Public Access Mode
+  const isWhitelisted = config.whitelist.includes(userTidStr);
+  if (!isWhitelisted && !config.publicEnabled) {
     return { ok: false, fallback: true, reason: 'NOT_IN_WHITELIST' };
   }
 
-  // 4. Message length & sanitization check
+  // 5. Message length & sanitization check
   const text = (message || '').trim();
   if (!text || text.length > 1000) {
     return { ok: false, fallback: true, reason: 'INVALID_LENGTH' };

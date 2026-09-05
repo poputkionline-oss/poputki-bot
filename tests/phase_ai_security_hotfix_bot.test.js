@@ -68,6 +68,7 @@ describe('PHASE AI SECURITY HOTFIX — Telegram Bot AI Assistant Client', () => 
     process.env.AI_ASSISTANT_ENABLED = 'true';
     process.env.AI_ASSISTANT_ENDPOINT = 'https://example.supabase.co/functions/v1/assistant-chat';
     process.env.INTERNAL_BOT_ASSISTANT_SECRET = 'super_secret_pilot_key_12345';
+    process.env.AI_PILOT_WHITELIST = '777001';
 
     const longMessage = 'A'.repeat(1001);
     const res = await callAssistantChat({
@@ -87,6 +88,7 @@ describe('PHASE AI SECURITY HOTFIX — Telegram Bot AI Assistant Client', () => 
     // Point to non-routable port to force immediate network failure
     process.env.AI_ASSISTANT_ENDPOINT = 'http://127.0.0.1:1';
     process.env.INTERNAL_BOT_ASSISTANT_SECRET = 'secret_test_key_12345';
+    process.env.AI_PILOT_WHITELIST = '777001';
     process.env.AI_REQUEST_TIMEOUT_MS = '100';
 
     const res = await callAssistantChat({
@@ -586,6 +588,388 @@ describe('PHASE AI SECURITY HOTFIX — Telegram Bot AI Assistant Client', () => 
       assert.strictEqual(sentMessages.length, 2, 'Default welcome flow sends menu + welcome text');
       assert.ok(!sentMessages.some(m => m.text.includes('лимит')), 'Must not send limit message');
       assert.ok(sentMessages.some(m => m.text.includes('Poputki.online')), 'Sends standard welcome text');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('18. AI_ASSISTANT_ENABLED=false, AI_ASSISTANT_PUBLIC_ENABLED=true -> 0 calls to Edge Function', async () => {
+    process.env.AI_ASSISTANT_ENABLED = 'false';
+    process.env.AI_ASSISTANT_PUBLIC_ENABLED = 'true';
+    process.env.AI_ASSISTANT_ENDPOINT = 'https://test-api.supabase.co/functions/v1/assistant-chat';
+    process.env.INTERNAL_BOT_ASSISTANT_SECRET = 'secret_test_key_12345';
+
+    let fetchCalls = 0;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => {
+      fetchCalls++;
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    };
+
+    try {
+      const res = await callAssistantChat({
+        updateId: 10018,
+        telegramId: 888001,
+        chatId: 888001,
+        message: 'Поездка в Худжанд'
+      });
+
+      assert.strictEqual(res.ok, false);
+      assert.strictEqual(res.fallback, true);
+      assert.strictEqual(res.reason, 'AI_DISABLED');
+      assert.strictEqual(fetchCalls, 0, 'Must have strictly 0 network calls when AI_ASSISTANT_ENABLED is false');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('19. AI enabled, public absent, user in whitelist -> access allowed', async () => {
+    process.env.AI_ASSISTANT_ENABLED = 'true';
+    delete process.env.AI_ASSISTANT_PUBLIC_ENABLED;
+    process.env.AI_PILOT_WHITELIST = '777001,777002';
+    process.env.AI_ASSISTANT_ENDPOINT = 'https://test-api.supabase.co/functions/v1/assistant-chat';
+    process.env.INTERNAL_BOT_ASSISTANT_SECRET = 'secret_test_key_12345';
+
+    let fetchCalls = 0;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => {
+      fetchCalls++;
+      return new Response(JSON.stringify({ ok: true, reply: 'Найден рейс', trips: [] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    };
+
+    try {
+      const res = await callAssistantChat({
+        updateId: 10019,
+        telegramId: 777001,
+        chatId: 777001,
+        message: 'Поездка в Худжанд'
+      });
+
+      assert.strictEqual(res.ok, true);
+      assert.strictEqual(res.fallback, false);
+      assert.strictEqual(fetchCalls, 1);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('20. AI enabled, public absent, user outside whitelist -> 0 network calls', async () => {
+    process.env.AI_ASSISTANT_ENABLED = 'true';
+    delete process.env.AI_ASSISTANT_PUBLIC_ENABLED;
+    process.env.AI_PILOT_WHITELIST = '777001';
+    process.env.AI_ASSISTANT_ENDPOINT = 'https://test-api.supabase.co/functions/v1/assistant-chat';
+    process.env.INTERNAL_BOT_ASSISTANT_SECRET = 'secret_test_key_12345';
+
+    let fetchCalls = 0;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => {
+      fetchCalls++;
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    };
+
+    try {
+      const res = await callAssistantChat({
+        updateId: 10020,
+        telegramId: 999999,
+        chatId: 999999,
+        message: 'Поездка в Худжанд'
+      });
+
+      assert.strictEqual(res.ok, false);
+      assert.strictEqual(res.fallback, true);
+      assert.strictEqual(res.reason, 'NOT_IN_WHITELIST');
+      assert.strictEqual(fetchCalls, 0);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('21. AI enabled, public=false, user outside whitelist -> 0 network calls', async () => {
+    process.env.AI_ASSISTANT_ENABLED = 'true';
+    process.env.AI_ASSISTANT_PUBLIC_ENABLED = 'false';
+    process.env.AI_PILOT_WHITELIST = '777001';
+    process.env.AI_ASSISTANT_ENDPOINT = 'https://test-api.supabase.co/functions/v1/assistant-chat';
+    process.env.INTERNAL_BOT_ASSISTANT_SECRET = 'secret_test_key_12345';
+
+    let fetchCalls = 0;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => {
+      fetchCalls++;
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    };
+
+    try {
+      const res = await callAssistantChat({
+        updateId: 10021,
+        telegramId: 999999,
+        chatId: 999999,
+        message: 'Поездка в Худжанд'
+      });
+
+      assert.strictEqual(res.ok, false);
+      assert.strictEqual(res.fallback, true);
+      assert.strictEqual(res.reason, 'NOT_IN_WHITELIST');
+      assert.strictEqual(fetchCalls, 0);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('22. AI enabled, public=true, user outside whitelist -> strictly 1 Edge Function call', async () => {
+    process.env.AI_ASSISTANT_ENABLED = 'true';
+    process.env.AI_ASSISTANT_PUBLIC_ENABLED = 'true';
+    process.env.AI_PILOT_WHITELIST = '777001';
+    process.env.AI_ASSISTANT_ENDPOINT = 'https://test-api.supabase.co/functions/v1/assistant-chat';
+    process.env.INTERNAL_BOT_ASSISTANT_SECRET = 'secret_test_key_12345';
+
+    let fetchCalls = 0;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => {
+      fetchCalls++;
+      return new Response(JSON.stringify({ ok: true, reply: 'Публичный ответ AI', trips: [] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    };
+
+    try {
+      const res = await callAssistantChat({
+        updateId: 10022,
+        telegramId: 999999, // Outside whitelist!
+        chatId: 999999,
+        message: 'Поездка в Худжанд'
+      });
+
+      assert.strictEqual(res.ok, true);
+      assert.strictEqual(res.fallback, false);
+      assert.strictEqual(res.reply, 'Публичный ответ AI');
+      assert.strictEqual(fetchCalls, 1, 'Strictly 1 Edge Function call in public mode');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('23. Public="TRUE" and public=" true " safely normalize to true', () => {
+    process.env.AI_ASSISTANT_PUBLIC_ENABLED = 'TRUE';
+    assert.strictEqual(getConfig().publicEnabled, true);
+
+    process.env.AI_ASSISTANT_PUBLIC_ENABLED = ' true ';
+    assert.strictEqual(getConfig().publicEnabled, true);
+
+    process.env.AI_ASSISTANT_PUBLIC_ENABLED = 'TrUe';
+    assert.strictEqual(getConfig().publicEnabled, true);
+  });
+
+  it('24. Public="1", "yes", empty string, and unknown values do not enable public mode', () => {
+    const invalidValues = ['1', 'yes', 'YES', '', '  ', '0', 'true1', 'enabled', 'on', 'null', 'undefined'];
+    for (const val of invalidValues) {
+      process.env.AI_ASSISTANT_PUBLIC_ENABLED = val;
+      assert.strictEqual(getConfig().publicEnabled, false, `Expected "${val}" to evaluate to false`);
+    }
+    delete process.env.AI_ASSISTANT_PUBLIC_ENABLED;
+    assert.strictEqual(getConfig().publicEnabled, false, 'Unset variable must evaluate to false');
+  });
+
+  it('25. Invalid or missing Telegram ID prevents Edge Function call', async () => {
+    process.env.AI_ASSISTANT_ENABLED = 'true';
+    process.env.AI_ASSISTANT_PUBLIC_ENABLED = 'true';
+    process.env.AI_ASSISTANT_ENDPOINT = 'https://test-api.supabase.co/functions/v1/assistant-chat';
+    process.env.INTERNAL_BOT_ASSISTANT_SECRET = 'secret_test_key_12345';
+
+    let fetchCalls = 0;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => {
+      fetchCalls++;
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    };
+
+    try {
+      const invalidIds = [null, undefined, '', '   ', 'abc', -1, 0, NaN, Infinity];
+      for (const tid of invalidIds) {
+        const res = await callAssistantChat({
+          updateId: 10025,
+          telegramId: tid,
+          chatId: 10025,
+          message: 'Поездка'
+        });
+        assert.strictEqual(res.ok, false);
+        assert.strictEqual(res.fallback, true);
+        assert.strictEqual(res.reason, 'INVALID_TELEGRAM_ID');
+      }
+      assert.strictEqual(fetchCalls, 0, 'Zero network calls for all invalid Telegram IDs');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('26. HTTP 429 DAILY in public mode returns RATE_LIMITED_DAILY with search button and 5 of 5 copy', async () => {
+    process.env.BOT_TOKEN = 'mock_bot_token_12345';
+    process.env.AI_ASSISTANT_ENABLED = 'true';
+    process.env.AI_ASSISTANT_PUBLIC_ENABLED = 'true';
+    process.env.AI_ASSISTANT_ENDPOINT = 'https://test-api.supabase.co/functions/v1/assistant-chat';
+    process.env.INTERNAL_BOT_ASSISTANT_SECRET = 'secret_test_key_12345';
+    delete process.env.AI_PILOT_WHITELIST;
+    process.env.MINI_APP_URL = 'https://poputki.online';
+
+    const sentMessages = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (url, options) => {
+      const urlStr = String(url);
+      if (urlStr.includes('/sendMessage')) {
+        sentMessages.push(JSON.parse(options.body));
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      if (urlStr.includes('assistant-chat')) {
+        return new Response(JSON.stringify({ error: 'RATE_LIMITED_DAILY', status: 'RATE_LIMITED' }), {
+          status: 429,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    };
+
+    try {
+      const res = {
+        statusCode: 200,
+        status(code) { this.statusCode = code; return this; },
+        json(obj) { this.body = obj; return this; }
+      };
+      await handler({
+        method: 'POST',
+        body: {
+          update_id: 20026,
+          message: { chat: { id: 999111, type: 'private' }, from: { id: 999111 }, text: 'Рейс в Худжанд' }
+        }
+      }, res);
+
+      assert.strictEqual(res.statusCode, 200);
+      assert.strictEqual(sentMessages.length, 1);
+      assert.ok(sentMessages[0].text.includes('Вы использовали дневной лимит AI-помощника — 5 запросов из 5.'));
+      assert.strictEqual(sentMessages[0].reply_markup.inline_keyboard[0][0].text, '🔍 Найти поездку в приложении');
+      assert.strictEqual(sentMessages[0].reply_markup.inline_keyboard[0][0].web_app.url, 'https://poputki.online/search');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('27. HTTP 429 GLOBAL in public mode returns localized message without exposing 500', async () => {
+    process.env.BOT_TOKEN = 'mock_bot_token_12345';
+    process.env.AI_ASSISTANT_ENABLED = 'true';
+    process.env.AI_ASSISTANT_PUBLIC_ENABLED = 'true';
+    process.env.AI_ASSISTANT_ENDPOINT = 'https://test-api.supabase.co/functions/v1/assistant-chat';
+    process.env.INTERNAL_BOT_ASSISTANT_SECRET = 'secret_test_key_12345';
+    delete process.env.AI_PILOT_WHITELIST;
+    process.env.MINI_APP_URL = 'https://poputki.online';
+
+    const sentMessages = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (url, options) => {
+      const urlStr = String(url);
+      if (urlStr.includes('/sendMessage')) {
+        sentMessages.push(JSON.parse(options.body));
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      if (urlStr.includes('assistant-chat')) {
+        return new Response(JSON.stringify({ error: 'RATE_LIMITED_GLOBAL_STOP_LOSS', status: 'GLOBAL_LIMIT_EXCEEDED' }), {
+          status: 429,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    };
+
+    try {
+      const res = {
+        statusCode: 200,
+        status(code) { this.statusCode = code; return this; },
+        json(obj) { this.body = obj; return this; }
+      };
+      await handler({
+        method: 'POST',
+        body: {
+          update_id: 20027,
+          message: { chat: { id: 999222, type: 'private' }, from: { id: 999222 }, text: 'Рейс в Худжанд' }
+        }
+      }, res);
+
+      assert.strictEqual(res.statusCode, 200);
+      assert.strictEqual(sentMessages.length, 1);
+      assert.ok(sentMessages[0].text.includes('AI-помощник временно достиг общего лимита запросов.'));
+      assert.ok(!sentMessages[0].text.includes('500'), 'Must not expose internal number 500');
+      assert.strictEqual(sentMessages[0].reply_markup.inline_keyboard[0][0].text, '🔍 Найти поездку в приложении');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('28. Timeout in public mode preserves fail-closed fallback without retries', async () => {
+    process.env.AI_ASSISTANT_ENABLED = 'true';
+    process.env.AI_ASSISTANT_PUBLIC_ENABLED = 'true';
+    process.env.AI_ASSISTANT_ENDPOINT = 'https://test-api.supabase.co/functions/v1/assistant-chat';
+    process.env.INTERNAL_BOT_ASSISTANT_SECRET = 'secret_test_key_12345';
+    process.env.AI_REQUEST_TIMEOUT_MS = '50';
+
+    let fetchCount = 0;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (url, options) => {
+      fetchCount++;
+      return new Promise((resolve, reject) => {
+        options.signal.addEventListener('abort', () => {
+          const err = new Error('The operation was aborted');
+          err.name = 'AbortError';
+          reject(err);
+        });
+      });
+    };
+
+    try {
+      const res = await callAssistantChat({
+        updateId: 20028,
+        telegramId: 999333,
+        chatId: 999333,
+        message: 'Рейс в Худжанд'
+      });
+
+      assert.strictEqual(res.ok, false);
+      assert.strictEqual(res.fallback, true);
+      assert.strictEqual(res.reason, 'TIMEOUT');
+      assert.strictEqual(fetchCount, 1, 'Strictly 1 fetch call on timeout, no retries');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('29. HTTP 500 in public mode preserves fail-closed fallback without retries', async () => {
+    process.env.AI_ASSISTANT_ENABLED = 'true';
+    process.env.AI_ASSISTANT_PUBLIC_ENABLED = 'true';
+    process.env.AI_ASSISTANT_ENDPOINT = 'https://test-api.supabase.co/functions/v1/assistant-chat';
+    process.env.INTERNAL_BOT_ASSISTANT_SECRET = 'secret_test_key_12345';
+
+    let fetchCount = 0;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => {
+      fetchCount++;
+      return new Response(JSON.stringify({ error: 'INTERNAL_ERROR' }), {
+        status: 500,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    };
+
+    try {
+      const res = await callAssistantChat({
+        updateId: 20029,
+        telegramId: 999444,
+        chatId: 999444,
+        message: 'Рейс в Худжанд'
+      });
+
+      assert.strictEqual(res.ok, false);
+      assert.strictEqual(res.fallback, true);
+      assert.strictEqual(res.reason, 'HTTP_500');
+      assert.strictEqual(fetchCount, 1, 'Strictly 1 fetch call on 500, no retries');
     } finally {
       globalThis.fetch = originalFetch;
     }
