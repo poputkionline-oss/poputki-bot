@@ -1,4 +1,5 @@
 import { callAssistantChat } from '../utils/assistantChatClient.js';
+import { formatAiAssistantResponse } from '../utils/aiResponseFormatter.js';
 
 const TELEGRAM_API = "https://api.telegram.org";
 const syncedGroups = new Set();
@@ -1001,22 +1002,17 @@ Set is_spam to true ONLY if confidence is "high". For anything uncertain, set is
         });
 
         if (aiResult.ok && aiResult.reply) {
-          const inlineKeyboard = [];
-          if (Array.isArray(aiResult.trips) && aiResult.trips.length > 0) {
-            for (const trip of aiResult.trips) {
-              const btnText = trip.type === 'bus'
-                ? `🚌 Автобус ${trip.from_city} → ${trip.to_city} (${trip.price_somoni} с.)`
-                : `🚗 Поездка ${trip.from_city} → ${trip.to_city} (${trip.price_somoni} с.)`;
-              const appUrl = `${MINI_APP_URL}${trip.booking_path}`;
-              inlineKeyboard.push([{ text: btnText, web_app: { url: appUrl } }]);
-            }
-          }
-          inlineKeyboard.push([{ text: "🔍 Найти поездку в приложении", web_app: { url: `${MINI_APP_URL}/search` } }]);
+          const formatted = formatAiAssistantResponse({
+            userMessage: text,
+            reply: aiResult.reply,
+            trips: aiResult.trips,
+            miniAppUrl: MINI_APP_URL
+          });
 
           await safeSendMessage({
             chat_id: chatId,
-            text: aiResult.reply.slice(0, 4000),
-            reply_markup: { inline_keyboard: inlineKeyboard }
+            text: formatted.text.slice(0, 4000),
+            reply_markup: { inline_keyboard: formatted.inlineKeyboard }
           });
           return res.status(200).json({ ok: true });
         }
