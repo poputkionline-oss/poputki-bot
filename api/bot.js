@@ -1,3 +1,5 @@
+import { callAssistantChat } from '../utils/assistantChatClient.js';
+
 const TELEGRAM_API = "https://api.telegram.org";
 const syncedGroups = new Set();
 
@@ -986,6 +988,37 @@ Set is_spam to true ONLY if confidence is "high". For anything uncertain, set is
               return res.status(200).json({ ok: true });
             }
           }
+        }
+      }
+
+      // Check AI Assistant Client (Fail-closed: if disabled/unconfigured/timeout/unauthorized, proceeds to static menu)
+      if (text && !text.startsWith('/')) {
+        const aiResult = await callAssistantChat({
+          updateId: update.update_id || Date.now(),
+          telegramId: message?.from?.id || chatId,
+          chatId: chatId,
+          message: text
+        });
+
+        if (aiResult.ok && aiResult.reply) {
+          const inlineKeyboard = [];
+          if (Array.isArray(aiResult.trips) && aiResult.trips.length > 0) {
+            for (const trip of aiResult.trips) {
+              const btnText = trip.type === 'bus'
+                ? `🚌 Автобус ${trip.from_city} → ${trip.to_city} (${trip.price_somoni} с.)`
+                : `🚗 Поездка ${trip.from_city} → ${trip.to_city} (${trip.price_somoni} с.)`;
+              const appUrl = `${MINI_APP_URL}${trip.booking_path}`;
+              inlineKeyboard.push([{ text: btnText, web_app: { url: appUrl } }]);
+            }
+          }
+          inlineKeyboard.push([{ text: "🔍 Найти поездку в приложении", web_app: { url: `${MINI_APP_URL}/search` } }]);
+
+          await safeSendMessage({
+            chat_id: chatId,
+            text: aiResult.reply.slice(0, 4000),
+            reply_markup: { inline_keyboard: inlineKeyboard }
+          });
+          return res.status(200).json({ ok: true });
         }
       }
 
