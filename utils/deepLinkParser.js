@@ -4,12 +4,15 @@
  * Phase P.1G.3: Telegram Deep Link Parser with Strict Allowlist
  *
  * Supported payload prefixes:
- * - w_<token>     — Web -> Telegram acquisition handshake (single-use, 15 min TTL)
- * - claim_<token> — Passenger ticket claim session
- * - s_<token>     — Ticket handoff claim session (compatibility alias)
- * - ref_<code>    — Passenger recommendation referral code
- * - ride_<id>     — Carpool ride deep link
- * - bus_<id>      — Bus ticket deep link
+ * - w_<token>         — Web -> Telegram acquisition handshake (single-use, 15 min TTL)
+ * - claim_<token>     — Passenger ticket claim session (online-booking ownership transfer)
+ * - s_<token>         — Ticket handoff claim session (compatibility alias for claim_)
+ * - subscribe_<token> — Manual-booking Telegram subscription session (booking_followers;
+ *                       NEVER transfers booking ownership, structurally distinct from
+ *                       claim_/s_ — a different table/hash namespace on the backend)
+ * - ref_<code>        — Passenger recommendation referral code
+ * - ride_<id>         — Carpool ride deep link
+ * - bus_<id>          — Bus ticket deep link
  *
  * Invariants:
  * - Max length: 64 characters
@@ -65,6 +68,15 @@ export function parseDeepLink(text) {
     const sMatch = payload.match(/^s_([a-f0-9]{24,64})$/i);
     if (sMatch) {
         return { type: 's', token: sMatch[1], valid: true };
+    }
+
+    // 3b. Manual-booking subscription payload: subscribe_<token>. Deliberately
+    // its own prefix, never merged with claim_/s_ — the two must never be
+    // interchangeable, on the bot side as well as the backend's separate
+    // booking_subscription_sessions table.
+    const subscribeMatch = payload.match(/^subscribe_([a-f0-9]{32})$/i);
+    if (subscribeMatch) {
+        return { type: 'subscribe', token: subscribeMatch[1], valid: true };
     }
 
     // 4. Passenger referral code: ref_<code>

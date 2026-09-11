@@ -10,6 +10,16 @@ import {
 
 const TELEGRAM_API = 'https://api.telegram.org';
 const CLAIM_STATE = 'waiting_for_ticket_claim_contact';
+// Manual Booking Telegram Subscription Model: deliberately its OWN pending-
+// state value, stored in its OWN table (bot_subscription_states, not
+// bot_user_states) — see setSubscriptionState()/getSubscriptionState()/
+// clearSubscriptionState() below. setClaimState() clears bot_user_states
+// unconditionally for a telegram_id (any prior row, any state), so sharing
+// that table would let a subscribe-flow in progress silently wipe an
+// in-flight claim for the same user, and vice versa. A separate table makes
+// that cross-clobbering structurally impossible rather than relying on a
+// state-value filter that setClaimState()'s own DELETE doesn't apply.
+const SUBSCRIBE_STATE = 'waiting_for_subscription_contact';
 
 function getConfig() {
   return {
@@ -118,6 +128,61 @@ async function getClaimState(telegramId) {
 
   const response = await fetch(
     `${supabaseUrl}/rest/v1/bot_user_states?telegram_id=eq.${encodeURIComponent(String(telegramId))}&state=eq.${CLAIM_STATE}&select=state,data&limit=1`,
+    { headers: supabaseHeaders(false) }
+  );
+
+  if (!response.ok) return null;
+  const rows = await response.json().catch(() => []);
+  return Array.isArray(rows) && rows.length > 0 ? rows[0] : null;
+}
+
+// --- Subscription state: fully isolated table, never touches bot_user_states ---
+
+async function clearSubscriptionState(telegramId) {
+  const { supabaseUrl } = getConfig();
+  if (!supabaseUrl) return;
+  await fetch(`${supabaseUrl}/rest/v1/bot_subscription_states?telegram_id=eq.${encodeURIComponent(String(telegramId))}`, {
+    method: 'DELETE',
+    headers: supabaseHeaders(false)
+  });
+}
+
+async function setSubscriptionState(telegramId, sessionToken) {
+  const { supabaseUrl } = getConfig();
+  if (!supabaseUrl) throw new Error('SUPABASE_NOT_CONFIGURED');
+
+  await clearSubscriptionState(telegramId);
+
+  const response = await fetch(`${supabaseUrl}/rest/v1/bot_subscription_states`, {
+    method: 'POST',
+    headers: {
+      ...supabaseHeaders(true),
+      Prefer: 'return=minimal'
+    },
+    body: JSON.stringify({
+      telegram_id: String(telegramId),
+      state: SUBSCRIBE_STATE,
+      // The raw session token lives here only for the few minutes between
+      // /start subscribe_<token> and the contact-share reply — the same
+      // risk profile as bot_user_states already storing a bearer-equivalent
+      // session_id for the claim flow: reading this row (anon key) is not
+      // by itself enough to act on it, since /claims/bot/subscribe still
+      // requires CLAIM_BOT_SHARED_SECRET.
+      data: { session_token: sessionToken }
+    })
+  });
+
+  if (!response.ok) {
+    throw new Error(`SUBSCRIPTION_STATE_SAVE_FAILED_${response.status}`);
+  }
+}
+
+async function getSubscriptionState(telegramId) {
+  const { supabaseUrl } = getConfig();
+  if (!supabaseUrl) return null;
+
+  const response = await fetch(
+    `${supabaseUrl}/rest/v1/bot_subscription_states?telegram_id=eq.${encodeURIComponent(String(telegramId))}&state=eq.${SUBSCRIBE_STATE}&select=state,data&limit=1`,
     { headers: supabaseHeaders(false) }
   );
 
@@ -297,6 +362,159 @@ async function handleClaimContact(message, state) {
   }
 }
 
+async function handleSubscribeStart(message, rawToken) {
+  const { botToken } = getConfig();
+  const chatId = message.chat.id;
+
+  if (!/^[a-f0-9]{32}$/i.test(rawToken || '')) {
+    await sendMessage(botToken, {
+      chat_id: chatId,
+      text: 'Ссылка недействительна или повреждена. Откройте страницу билета снова и нажмите «Добавить билет в Telegram».'
+    });
+    return;
+  }
+
+  try {
+    await setSubscriptionState(chatId, rawToken);
+  } catch (error) {
+    await sendMessage(botToken, {
+      chat_id: chatId,
+      text: 'Сейчас не удалось начать добавление билета. Попробуйте ещё раз чуть позже.'
+    });
+    return;
+  }
+
+  await sendMessage(botToken, {
+    chat_id: chatId,
+    text: [
+      '✅ POPUTKI.ONLINE • Официальный бот',
+      '',
+      'Чтобы добавить билет и получать уведомления о поездке в Telegram, подтвердите свой номер кнопкой ниже.'
+    ].join('\n'),
+    reply_markup: {
+      keyboard: [[{
+        text: '📱 Подтвердить мой номер',
+        request_contact: true
+      }]],
+      resize_keyboard: true,
+      one_time_keyboard: true,
+      input_field_placeholder: 'Нажмите кнопку для подтверждения номера'
+    }
+  });
+}
+
+async function handleSubscribeContact(message, state) {
+  const { botToken, miniAppUrl } = getConfig();
+  const chatId = message.chat.id;
+  const contact = message.contact;
+  const sender = message.from;
+  const sessionToken = state?.data?.session_token;
+
+  if (!contact?.user_id || !sender?.id || String(contact.user_id) !== String(sender.id)) {
+    await sendMessage(botToken, {
+      chat_id: chatId,
+      text: 'Для безопасности нужно отправить именно свой номер через кнопку «Подтвердить мой номер». Пересланный контакт не подходит.'
+    });
+    return;
+  }
+
+  if (!sessionToken) {
+    await clearSubscriptionState(chatId).catch(() => {});
+    await sendMessage(botToken, {
+      chat_id: chatId,
+      text: 'Сессия устарела. Откройте страницу билета заново и снова нажмите «Добавить билет в Telegram».',
+      reply_markup: { remove_keyboard: true }
+    });
+    return;
+  }
+
+  try {
+    const result = await backendPost('/claims/bot/subscribe', {
+      sessionToken,
+      telegramUser: {
+        id: sender.id,
+        first_name: sender.first_name || null,
+        last_name: sender.last_name || null,
+        username: sender.username || null
+      },
+      telegramContact: {
+        user_id: contact.user_id,
+        phone_number: contact.phone_number
+      }
+    });
+
+    await clearSubscriptionState(chatId).catch(() => {});
+
+    const trip = result.trip || {};
+    const summary = [
+      '✅ Билет добавлен в Telegram.',
+      trip.fromCity ? `🚌 Маршрут: ${trip.fromCity} → ${trip.toCity || '—'}` : null,
+      trip.departureDate ? `🗓 Отправление: ${formatDeparture(trip.departureDate, trip.departureTime)}` : null,
+      trip.seatNumbers ? `💺 Место: ${formatSeatNumbers(trip.seatNumbers)}` : null,
+      '',
+      'Вы будете получать уведомления об изменениях этой поездки здесь.'
+    ].filter(Boolean).join('\n');
+
+    await sendMessage(botToken, {
+      chat_id: chatId,
+      text: summary,
+      reply_markup: {
+        inline_keyboard: [[
+          { text: '🎫 Мои поездки', web_app: { url: `${miniAppUrl}/my-bus-tickets` } }
+        ]]
+      }
+    });
+  } catch (error) {
+    const terminalCodes = new Set(['SESSION_INVALID_EXPIRED_OR_CONSUMED', 'BOOKING_NOT_SUBSCRIBABLE']);
+    if (terminalCodes.has(error.code)) {
+      await clearSubscriptionState(chatId).catch(() => {});
+    }
+
+    let text = 'Не удалось добавить билет. Попробуйте ещё раз через страницу билета.';
+    if (error.code === 'SESSION_INVALID_EXPIRED_OR_CONSUMED') {
+      text = 'Время подтверждения истекло. Откройте страницу билета заново и снова нажмите «Добавить билет в Telegram».';
+    } else if (error.code === 'BOOKING_NOT_SUBSCRIBABLE') {
+      text = 'Эта поездка больше недоступна для подписки — бронь отменена или поездка уже завершилась.';
+    }
+
+    await sendMessage(botToken, {
+      chat_id: chatId,
+      text,
+      reply_markup: terminalCodes.has(error.code) ? { remove_keyboard: true } : undefined
+    });
+  }
+}
+
+async function handleUnsubscribeCommand(message, bookingIdText) {
+  const { botToken } = getConfig();
+  const chatId = message.chat.id;
+  const bookingId = parseInt(bookingIdText, 10);
+
+  if (!bookingId) {
+    await sendMessage(botToken, {
+      chat_id: chatId,
+      text: 'Укажите номер брони: /unsubscribe <номер>'
+    });
+    return;
+  }
+
+  try {
+    await backendPost('/claims/bot/unsubscribe', {
+      bookingId,
+      telegramUserId: message.from?.id
+    });
+    await sendMessage(botToken, {
+      chat_id: chatId,
+      text: `Вы отписались от уведомлений по брони №${bookingId}.`
+    });
+  } catch (error) {
+    await sendMessage(botToken, {
+      chat_id: chatId,
+      text: 'Не удалось отписаться. Возможно, вы уже не подписаны на эту бронь.'
+    });
+  }
+}
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return baseHandler(req, res);
@@ -325,6 +543,11 @@ export default async function handler(req, res) {
       return res.status(200).json({ ok: true });
     }
 
+    if (parsed.type === 'subscribe') {
+      await handleSubscribeStart(message, parsed.token);
+      return res.status(200).json({ ok: true });
+    }
+
     if (parsed.type === 'ref') {
       await handleReferralStart(message, parsed.code);
       return res.status(200).json({ ok: true });
@@ -342,15 +565,32 @@ export default async function handler(req, res) {
     // branch here — that would process the same payload twice.
   }
 
-  // 2. Process Contact Sharing
+  // 1b. /unsubscribe <bookingId> — Manual Booking Subscription Model only.
+  if (text.startsWith('/unsubscribe')) {
+    const bookingIdText = text.trim().split(/\s+/)[1];
+    await handleUnsubscribeCommand(message, bookingIdText);
+    return res.status(200).json({ ok: true });
+  }
+
+  // 2. Process Contact Sharing. Claim state and subscription state live in
+  // two fully separate tables (see the SUBSCRIBE_STATE comment above), so
+  // checking one never risks clobbering or masking the other — a user with
+  // both an in-flight claim and an in-flight subscription resolves each
+  // independently by whichever check matches first.
   if (message?.contact) {
-    const state = await getClaimState(message.chat.id).catch(() => null);
-    if (state?.state === CLAIM_STATE) {
-      await handleClaimContact(message, state);
+    const claimState = await getClaimState(message.chat.id).catch(() => null);
+    if (claimState?.state === CLAIM_STATE) {
+      await handleClaimContact(message, claimState);
       return res.status(200).json({ ok: true });
     }
 
-    // Generic contact sharing outside ticket claim
+    const subscriptionState = await getSubscriptionState(message.chat.id).catch(() => null);
+    if (subscriptionState?.state === SUBSCRIBE_STATE) {
+      await handleSubscribeContact(message, subscriptionState);
+      return res.status(200).json({ ok: true });
+    }
+
+    // Generic contact sharing outside ticket claim/subscription
     await handleGenericContact(message);
     return res.status(200).json({ ok: true });
   }
