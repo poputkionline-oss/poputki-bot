@@ -335,6 +335,17 @@ async function handleSubscribeStart(message, rawToken) {
     return;
   }
 
+  // A successful bind is the user's most recent explicit action and must
+  // take priority over any abandoned/stale claim-flow state left in
+  // bot_user_states from an earlier, unrelated claim_/s_ deep link —
+  // otherwise the dispatcher's claim-state-checked-first ordering would
+  // route this contact's upcoming contact-share into the old claim flow
+  // instead of completing the subscription. Mirrors the "most recent
+  // explicit action wins" principle already enforced backend-side via
+  // superseded_at. Only cleared on a successful bind — a failed/expired
+  // token must not destroy a possibly-still-valid claim state.
+  await clearClaimState(chatId).catch(() => {});
+
   await sendMessage(botToken, {
     chat_id: chatId,
     text: [

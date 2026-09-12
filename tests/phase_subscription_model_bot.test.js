@@ -182,6 +182,40 @@ describe('bot-claim.js — /unsubscribe command', () => {
     });
 });
 
+describe('bot-claim.js — handleSubscribeStart clears stale claim state on successful bind', () => {
+    const startBlock = content.slice(
+        content.indexOf('async function handleSubscribeStart'),
+        content.indexOf('async function attemptSubscribeFromContact')
+    );
+
+    it('calls clearClaimState(chatId) after a successful bind, so a stale claim_/s_ state left in bot_user_states cannot hijack the upcoming contact-share into the old claim flow', () => {
+        assert.match(startBlock, /clearClaimState\(chatId\)/);
+    });
+
+    it('the clearClaimState call happens strictly after the bind try/catch resolves successfully — before the "confirm your number" prompt, not before the bind attempt', () => {
+        const bindTryIdx = startBlock.indexOf('try {');
+        const bindCatchEndIdx = startBlock.indexOf("return;\n  }", startBlock.indexOf('catch (error)'));
+        const clearIdx = startBlock.indexOf('clearClaimState(chatId)');
+        const confirmPromptIdx = startBlock.indexOf('подтвердите свой номер');
+        assert.ok(bindTryIdx !== -1 && bindCatchEndIdx !== -1 && clearIdx !== -1 && confirmPromptIdx !== -1);
+        assert.ok(clearIdx > bindCatchEndIdx, 'clearClaimState must run after the bind try/catch, not before or inside it');
+        assert.ok(clearIdx < confirmPromptIdx, 'clearClaimState must run before the confirm-number prompt is sent');
+    });
+
+    it('a failed/expired bind returns early (inside the catch block) without ever reaching clearClaimState — a stale-but-still-valid claim state must survive a failed subscribe attempt', () => {
+        const catchBlock = startBlock.slice(
+            startBlock.indexOf('catch (error)'),
+            startBlock.indexOf('catch (error)') + 300
+        );
+        assert.ok(!catchBlock.includes('clearClaimState'));
+        assert.match(catchBlock, /return;/);
+    });
+
+    it('the clearClaimState call swallows its own errors (never lets a Supabase hiccup break the subscribe flow)', () => {
+        assert.match(startBlock, /clearClaimState\(chatId\)\.catch\(\(\)\s*=>\s*\{\}\)/);
+    });
+});
+
 describe('bot-claim.js — old claim_/s_ flow is functionally unchanged', () => {
     it('claim_/s_ still dispatch to handleClaimStart exactly as before', () => {
         assert.match(content, /parsed\.type === 'claim' \|\| parsed\.type === 's'/);
