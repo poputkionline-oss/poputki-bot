@@ -112,13 +112,13 @@ describe('bot-claim.js — attemptSubscribeFromContact takes no session token/id
         assert.ok(!block.includes('sessionId'));
     });
 
-    it('rejects a contact whose user_id differs from the sender before ever calling the backend', () => {
+    it('rejects a contact whose user_id differs from the sender before ever calling the backend, treating it as not_pending (not a subscribe attempt)', () => {
         const block = content.slice(
             content.indexOf('async function attemptSubscribeFromContact'),
             content.indexOf('async function handleUnsubscribeCommand')
         );
         assert.match(block, /String\(contact\.user_id\)\s*!==\s*String\(sender\.id\)/);
-        assert.match(block, /return false;/);
+        assert.match(block, /return 'not_pending';/);
     });
 
     it('never calls /claims/bot/verify-and-claim (that is the separate, untouched online-claim flow)', () => {
@@ -129,25 +129,37 @@ describe('bot-claim.js — attemptSubscribeFromContact takes no session token/id
         assert.ok(!block.includes('verify-and-claim'));
     });
 
-    it('SESSION_INVALID_EXPIRED_OR_CONSUMED and FEATURE_DISABLED both fall through silently (return false), only BOOKING_NOT_SUBSCRIBABLE is reportable', () => {
+    it('returns one of three named string outcomes, never a plain boolean — SESSION_INVALID_EXPIRED_OR_CONSUMED/FEATURE_DISABLED are the only two positive not_pending confirmations, BOOKING_NOT_SUBSCRIBABLE is consumed (reportable), and everything else (network/unmapped) is its own distinct error outcome', () => {
         const block = content.slice(
             content.indexOf('async function attemptSubscribeFromContact'),
             content.indexOf('async function handleUnsubscribeCommand')
         );
-        assert.match(block, /reportableCodes\s*=\s*new Set\(\['BOOKING_NOT_SUBSCRIBABLE'\]\)/);
-        assert.match(block, /if\s*\(!reportableCodes\.has\(error\.code\)\)\s*\{\s*return false;/);
+        assert.match(block, /notPendingCodes\s*=\s*new Set\(\['FEATURE_DISABLED',\s*'SESSION_INVALID_EXPIRED_OR_CONSUMED'\]\)/);
+        assert.match(block, /if\s*\(notPendingCodes\.has\(error\.code\)\)\s*\{\s*return 'not_pending';/);
+        assert.match(block, /error\.code === 'BOOKING_NOT_SUBSCRIBABLE'/);
+        assert.match(block, /return 'consumed';/);
+        assert.match(block, /return 'error';/);
+        // never a bare boolean return anywhere in this function
+        assert.ok(!/return (true|false);/.test(block));
     });
 });
 
 describe('bot-claim.js — dispatcher wiring', () => {
-    it('the dispatcher checks claim state first, then opportunistically attempts subscribe, before falling back to generic contact handling', () => {
+    it('the dispatcher attempts subscribe FIRST, unconditionally, and only checks claim state once the outcome is not_pending, before falling back to generic contact handling', () => {
         const dispatchBlock = content.slice(content.indexOf('// 2. Process Contact Sharing'));
-        const claimIdx = dispatchBlock.indexOf('getClaimState(message.chat.id)');
         const subscribeIdx = dispatchBlock.indexOf('attemptSubscribeFromContact(message)');
+        const notPendingCheckIdx = dispatchBlock.indexOf("subscribeOutcome !== 'not_pending'");
+        const claimIdx = dispatchBlock.indexOf('getClaimState(message.chat.id)');
         const genericIdx = dispatchBlock.indexOf('handleGenericContact(message)');
-        assert.ok(claimIdx !== -1 && subscribeIdx !== -1 && genericIdx !== -1);
-        assert.ok(claimIdx < subscribeIdx);
-        assert.ok(subscribeIdx < genericIdx);
+        assert.ok(subscribeIdx !== -1 && notPendingCheckIdx !== -1 && claimIdx !== -1 && genericIdx !== -1);
+        assert.ok(subscribeIdx < notPendingCheckIdx);
+        assert.ok(notPendingCheckIdx < claimIdx);
+        assert.ok(claimIdx < genericIdx);
+    });
+
+    it('attemptSubscribeFromContact is called without a blanket .catch() that could mask a real error as "nothing pending"', () => {
+        const dispatchBlock = content.slice(content.indexOf('// 2. Process Contact Sharing'), content.indexOf('return baseHandler(req, res);'));
+        assert.ok(!/attemptSubscribeFromContact\(message\)\.catch/.test(dispatchBlock));
     });
 
     it('claim state functions still target only bot_user_states (untouched)', () => {

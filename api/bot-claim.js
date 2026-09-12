@@ -335,14 +335,16 @@ async function handleSubscribeStart(message, rawToken) {
     return;
   }
 
-  // A successful bind is the user's most recent explicit action and must
-  // take priority over any abandoned/stale claim-flow state left in
-  // bot_user_states from an earlier, unrelated claim_/s_ deep link —
-  // otherwise the dispatcher's claim-state-checked-first ordering would
-  // route this contact's upcoming contact-share into the old claim flow
-  // instead of completing the subscription. Mirrors the "most recent
-  // explicit action wins" principle already enforced backend-side via
-  // superseded_at. Only cleared on a successful bind — a failed/expired
+  // Defense in depth only — NOT the mechanism that keeps a later contact
+  // share from being misrouted into the old claim flow. That guarantee now
+  // comes structurally from the dispatcher checking for an active bound
+  // subscription session before it ever looks at claim state (see
+  // attemptSubscribeFromContact()'s comment). Clearing here just tidies up
+  // an abandoned claim-flow state promptly instead of waiting for its own
+  // TTL, so it's fine for this to fail silently: a successful bind is the
+  // user's most recent explicit action either way, consistent with the
+  // "most recent explicit action wins" principle already used backend-side
+  // via superseded_at. Only cleared on a successful bind — a failed/expired
   // token must not destroy a possibly-still-valid claim state.
   await clearClaimState(chatId).catch(() => {});
 
@@ -365,14 +367,40 @@ async function handleSubscribeStart(message, rawToken) {
   });
 }
 
-// Called opportunistically from the contact-share dispatcher for every
-// contact message that isn't part of an in-flight ticket claim (see
-// handler() below). Takes NO session token/id — only the verified sender
-// identity — and lets the backend resolve the most recently bound,
-// still-valid subscription session for this telegram id, if any. Returns
-// true when this contact WAS consumed as a subscribe completion (success or
-// a real, reportable failure), false when there was nothing pending for
-// this user, so the caller should fall through to generic contact handling.
+// Called from the contact-share dispatcher UNCONDITIONALLY, BEFORE any
+// check of the legacy claim-flow state in bot_user_states (see handler()
+// below). Takes NO session token/id — only the verified sender identity —
+// and asks the backend to resolve and complete the most recently bound,
+// still-valid subscription session for this telegram id, if any, in the
+// same call.
+//
+// This must run first: an active bound subscription session is
+// authoritative over a stale/abandoned claim-flow state, and that must hold
+// structurally — never merely because handleSubscribeStart happened to
+// clear bot_user_states (that clear is defense in depth only; see its own
+// comment). Relying solely on clearing stale state is exactly what let a
+// leftover claim state hijack a later subscribe contact-share in
+// production; checking for an active subscription session first removes
+// the dependency on that clear entirely.
+//
+// Returns one of three outcomes — never a plain boolean, so the three cases
+// below can never be collapsed into one "fall through" branch by accident:
+//   'consumed'    — the subscription flow owns this contact: it either
+//                    completed successfully, or a real, reportable failure
+//                    (BOOKING_NOT_SUBSCRIBABLE) was shown to the user. The
+//                    caller must NOT consult the claim flow.
+//   'not_pending' — the backend positively confirmed there is nothing
+//                    pending for this telegram id (no bound session, or the
+//                    subscription feature flag is off) — only now is it
+//                    safe to fall through to the legacy claim-state check.
+//   'error'       — an unexpected failure talking to the backend (network
+//                    failure, unmapped error code, 5xx). Treated the same
+//                    as 'consumed': a generic message is shown and the
+//                    caller stops here. An ambiguous outcome must never be
+//                    silently mapped to "nothing pending" — that is exactly
+//                    the misrouting this replaces — so this is deliberately
+//                    NOT swallowed by a blanket .catch(() => false)/(() =>
+//                    {}) at the call site.
 async function attemptSubscribeFromContact(message) {
   const { botToken, miniAppUrl } = getConfig();
   const chatId = message.chat.id;
@@ -381,10 +409,10 @@ async function attemptSubscribeFromContact(message) {
 
   // Not a self-verified contact share at all (e.g. a forwarded card) — this
   // is never a subscribe attempt, so don't spend a backend round trip on
-  // it; let it fall straight through to generic contact handling exactly as
+  // it; let the caller fall through to whatever else applies, exactly as
   // before this model existed.
   if (!contact?.user_id || !sender?.id || String(contact.user_id) !== String(sender.id)) {
-    return false;
+    return 'not_pending';
   }
 
   let result;
@@ -402,24 +430,34 @@ async function attemptSubscribeFromContact(message) {
       }
     });
   } catch (error) {
-    // Only a real, actionable failure of an ACTUALLY pending subscription is
-    // ever reported to the user. Every other code — no bound session
-    // (SESSION_INVALID_EXPIRED_OR_CONSUMED), the feature flag being off in
-    // this environment (FEATURE_DISABLED, the default in production today),
-    // or any backend/user-resolution hiccup — means this contact share was
-    // never about the subscription flow, so it falls through silently to
-    // generic contact handling exactly as it would have before this model
-    // existed.
-    const reportableCodes = new Set(['BOOKING_NOT_SUBSCRIBABLE']);
-    if (!reportableCodes.has(error.code)) {
-      return false;
+    // Only these two codes are a POSITIVE confirmation that nothing is
+    // pending for this telegram id — no bound session
+    // (SESSION_INVALID_EXPIRED_OR_CONSUMED), or the feature flag being off
+    // in this environment (FEATURE_DISABLED, the default in production
+    // today). Everything else is either a real, reportable failure of an
+    // ACTUALLY pending subscription, or a genuinely ambiguous error.
+    const notPendingCodes = new Set(['FEATURE_DISABLED', 'SESSION_INVALID_EXPIRED_OR_CONSUMED']);
+    if (notPendingCodes.has(error.code)) {
+      return 'not_pending';
     }
 
+    if (error.code === 'BOOKING_NOT_SUBSCRIBABLE') {
+      await sendMessage(botToken, {
+        chat_id: chatId,
+        text: 'Эта поездка больше недоступна для подписки — бронь отменена или поездка уже завершилась.'
+      });
+      return 'consumed';
+    }
+
+    // Unmapped code, or no code at all (network failure, unexpected 5xx):
+    // we genuinely do not know whether a subscription session was pending,
+    // so this must not be treated as "not pending" — stop here instead of
+    // ever reaching the legacy claim flow on an ambiguous outcome.
     await sendMessage(botToken, {
       chat_id: chatId,
-      text: 'Эта поездка больше недоступна для подписки — бронь отменена или поездка уже завершилась.'
+      text: 'Не удалось обработать ваш контакт. Попробуйте ещё раз через минуту.'
     });
-    return true;
+    return 'error';
   }
 
   const trip = result.trip || {};
@@ -441,7 +479,7 @@ async function attemptSubscribeFromContact(message) {
       ]]
     }
   });
-  return true;
+  return 'consumed';
 }
 
 async function handleUnsubscribeCommand(message, bookingIdText) {
@@ -531,21 +569,27 @@ export default async function handler(req, res) {
     return res.status(200).json({ ok: true });
   }
 
-  // 2. Process Contact Sharing. Claim state still lives in bot_user_states,
-  // checked first exactly as before. The subscription flow keeps NO bot-side
-  // state at all (see attemptSubscribeFromContact() above) — when not in an
-  // active claim, every contact share is opportunistically offered to the
-  // backend as a possible subscribe completion, which reports back whether
-  // there actually was anything pending for this telegram id.
+  // 2. Process Contact Sharing. The subscription flow is checked FIRST,
+  // unconditionally, for every contact share — an active bound subscription
+  // session is authoritative over any old claim-flow state in
+  // bot_user_states, and that priority is structural (see
+  // attemptSubscribeFromContact()'s own comment), not merely a side effect
+  // of handleSubscribeStart clearing bot_user_states on bind. Only once the
+  // backend has POSITIVELY confirmed nothing is pending for this telegram id
+  // ('not_pending') do we fall back to the legacy claim-state check.
+  // attemptSubscribeFromContact() never throws — every backend outcome,
+  // including an unexpected error, resolves to one of its three named
+  // outcomes — so there is deliberately no blanket .catch() here that could
+  // mask a real failure as "nothing pending".
   if (message?.contact) {
-    const claimState = await getClaimState(message.chat.id).catch(() => null);
-    if (claimState?.state === CLAIM_STATE) {
-      await handleClaimContact(message, claimState);
+    const subscribeOutcome = await attemptSubscribeFromContact(message);
+    if (subscribeOutcome !== 'not_pending') {
       return res.status(200).json({ ok: true });
     }
 
-    const subscribeHandled = await attemptSubscribeFromContact(message).catch(() => false);
-    if (subscribeHandled) {
+    const claimState = await getClaimState(message.chat.id).catch(() => null);
+    if (claimState?.state === CLAIM_STATE) {
+      await handleClaimContact(message, claimState);
       return res.status(200).json({ ok: true });
     }
 
