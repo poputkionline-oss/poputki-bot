@@ -102,19 +102,38 @@ const TELEGRAM_SEND_ROUTE = {
     respond: () => jsonResponse(200, { ok: true, result: {} })
 };
 
+// bot_user_states GET routes are keyed by the exact state=eq.<value> query
+// param — a real PostgREST backend filters server-side, so a mock that
+// matched on table name alone would answer the SAME canned row for both the
+// claim-state check AND the (separate) subscribe-pending-marker check,
+// silently making them indistinguishable in tests.
 const CLAIM_STATE_GET_ROUTE = (sessionId = 'real-claim-session') => ({
-    match: (url, opts) => url.includes('/rest/v1/bot_user_states') && (!opts.method || opts.method === 'GET'),
+    match: (url, opts) => url.includes('/rest/v1/bot_user_states') && url.includes('state=eq.waiting_for_ticket_claim_contact') && (!opts.method || opts.method === 'GET'),
     respond: () => jsonResponse(200, [{ state: 'waiting_for_ticket_claim_contact', data: { session_id: sessionId, expires_at: '2026-09-13T00:00:00Z' } }])
 });
 
 const NO_CLAIM_STATE_GET_ROUTE = {
-    match: (url, opts) => url.includes('/rest/v1/bot_user_states') && (!opts.method || opts.method === 'GET'),
+    match: (url, opts) => url.includes('/rest/v1/bot_user_states') && url.includes('state=eq.waiting_for_ticket_claim_contact') && (!opts.method || opts.method === 'GET'),
     respond: () => jsonResponse(200, [])
 };
+
+// Default: no subscribe-pending marker. Tests that need one present pass
+// SUBSCRIBE_PENDING_MARKER_GET_ROUTE(true) instead.
+const SUBSCRIBE_PENDING_MARKER_GET_ROUTE = (present = false) => ({
+    match: (url, opts) => url.includes('/rest/v1/bot_user_states') && url.includes('state=eq.subscribe_pending_contact') && (!opts.method || opts.method === 'GET'),
+    respond: () => jsonResponse(200, present
+        ? [{ state: 'subscribe_pending_contact', data: { expires_at: new Date(Date.now() + 15 * 60 * 1000).toISOString() } }]
+        : [])
+});
 
 const CLAIM_STATE_DELETE_ROUTE = {
     match: (url, opts) => url.includes('/rest/v1/bot_user_states') && opts.method === 'DELETE',
     respond: () => jsonResponse(200, {})
+};
+
+const SUBSCRIBE_PENDING_MARKER_POST_ROUTE = {
+    match: (url, opts) => url.includes('/rest/v1/bot_user_states') && opts.method === 'POST',
+    respond: () => jsonResponse(201, {})
 };
 
 describe('bot-claim.js handler() — real dispatcher order via contact-share', () => {
@@ -191,10 +210,11 @@ describe('bot-claim.js handler() — real dispatcher order via contact-share', (
         assert.ok(finalMessage.body.text.includes('Билет успешно добавлен'), 'user must see the claim-success message');
     });
 
-    it('RELIABILITY: an ambiguous/network error from the subscribe check must NOT block an already-active claim conversation — fails open to the claim flow', async () => {
+    it('RELIABILITY: an ambiguous/network error from the subscribe check, with NO subscribe-pending marker, must NOT block an already-active claim conversation — fails open to the claim flow', async () => {
         const fetchMock = makeFetchMock([
             TELEGRAM_SEND_ROUTE,
             CLAIM_STATE_GET_ROUTE('real-claim-session'),
+            SUBSCRIBE_PENDING_MARKER_GET_ROUTE(false),
             CLAIM_STATE_DELETE_ROUTE,
             {
                 match: (url, opts) => url.includes('/claims/bot/subscribe') && opts.method === 'POST',
@@ -212,11 +232,38 @@ describe('bot-claim.js handler() — real dispatcher order via contact-share', (
 
         assert.equal(res.statusCode, 200);
         assert.ok(fetchMock.calledWith('/claims/bot/subscribe'), 'subscription check must still be attempted');
-        assert.ok(fetchMock.calledWith('/claims/bot/verify-and-claim'), 'an ambiguous subscribe-check error must fail OPEN toward the already-active claim flow, not block it');
+        assert.ok(fetchMock.calledWith('/claims/bot/verify-and-claim'), 'an ambiguous subscribe-check error with no marker must fail OPEN toward the already-active claim flow, not block it');
 
         const sendCalls = fetchMock.calls.filter(c => c.url.includes('/sendMessage'));
         const finalMessage = sendCalls[sendCalls.length - 1];
         assert.ok(finalMessage.body.text.includes('Билет успешно добавлен'), 'user must see the claim flow complete normally despite the subscribe-check error');
+    });
+
+    it('SAFETY: an ambiguous/network error from the subscribe check WITH a subscribe-pending marker present must NOT fail open — a genuine subscribe attempt must never be silently completed as someone else\'s claim', async () => {
+        const fetchMock = makeFetchMock([
+            TELEGRAM_SEND_ROUTE,
+            CLAIM_STATE_GET_ROUTE('real-claim-session'),
+            SUBSCRIBE_PENDING_MARKER_GET_ROUTE(true),
+            {
+                match: (url, opts) => url.includes('/claims/bot/subscribe') && opts.method === 'POST',
+                respond: () => jsonResponse(500, { error: 'Не удалось добавить билет в Telegram', code: 'SUBSCRIBE_FAILED' })
+            },
+            {
+                match: (url) => url.includes('/claims/bot/verify-and-claim'),
+                respond: () => { throw new Error('must never complete a claim when a subscribe-pending marker shows a real subscribe attempt is likely in flight'); }
+            }
+        ]);
+        global.fetch = fetchMock;
+
+        const res = makeRes();
+        await handler({ method: 'POST', body: { message: makeContactMessage() } }, res);
+
+        assert.equal(res.statusCode, 200);
+        assert.ok(fetchMock.calledWith('/claims/bot/subscribe'));
+        assert.ok(!fetchMock.calledWith('/claims/bot/verify-and-claim'), 'claim flow must not run when a subscribe-pending marker is present');
+
+        const sendCall = fetchMock.calls.find(c => c.url.includes('/sendMessage'));
+        assert.ok(sendCall.body.text.includes('Попробуйте ещё раз'), 'user must see the generic subscribe retry message, not a silently-completed claim');
     });
 
     it('an ambiguous/network error from the subscribe check with NO claim state to fail open to just shows the generic retry message', async () => {

@@ -165,10 +165,12 @@ describe('bot-claim.js — dispatcher wiring', () => {
         assert.ok(consumedIdx !== -1);
     });
 
-    it('an "error" outcome fails OPEN toward an already-active claim conversation instead of blocking it', () => {
+    it('an "error" outcome checks the persistent subscribe-pending marker before deciding whether to fail OPEN toward an already-active claim conversation', () => {
         const errorBlockIdx = dispatchBlock.indexOf("if (subscribeOutcome === 'error')");
-        const errorBlock = dispatchBlock.slice(errorBlockIdx, errorBlockIdx + 300);
-        assert.match(errorBlock, /if\s*\(hasClaimState\)\s*\{\s*await handleClaimContact\(message, claimState\);/);
+        const errorBlock = dispatchBlock.slice(errorBlockIdx, errorBlockIdx + 500);
+        assert.match(errorBlock, /if\s*\(hasClaimState\)\s*\{/);
+        assert.match(errorBlock, /getSubscribePendingMarker\(message\.chat\.id\)/);
+        assert.match(errorBlock, /if\s*\(!subscribePending\)\s*\{\s*await handleClaimContact\(message, claimState\);/);
     });
 
     it('"not_pending" still runs the claim flow when claim state exists, or generic handling otherwise', () => {
@@ -216,37 +218,59 @@ describe('bot-claim.js — /unsubscribe command', () => {
     });
 });
 
-describe('bot-claim.js — handleSubscribeStart clears stale claim state on successful bind', () => {
+describe('bot-claim.js — handleSubscribeStart writes a subscribe-pending marker on successful bind', () => {
     const startBlock = content.slice(
         content.indexOf('async function handleSubscribeStart'),
         content.indexOf('async function attemptSubscribeFromContact')
     );
 
-    it('calls clearClaimState(chatId) after a successful bind, so a stale claim_/s_ state left in bot_user_states cannot hijack the upcoming contact-share into the old claim flow', () => {
-        assert.match(startBlock, /clearClaimState\(chatId\)/);
+    it('calls setSubscribePendingMarker(chatId, ...) after a successful bind, so a stale claim_/s_ state left in bot_user_states cannot hijack the upcoming contact-share into the old claim flow', () => {
+        assert.match(startBlock, /setSubscribePendingMarker\(chatId,/);
     });
 
-    it('the clearClaimState call happens strictly after the bind try/catch resolves successfully — before the "confirm your number" prompt, not before the bind attempt', () => {
+    it('the marker call happens strictly after the bind try/catch resolves successfully — before the "confirm your number" prompt, not before the bind attempt', () => {
         const bindTryIdx = startBlock.indexOf('try {');
         const bindCatchEndIdx = startBlock.indexOf("return;\n  }", startBlock.indexOf('catch (error)'));
-        const clearIdx = startBlock.indexOf('clearClaimState(chatId)');
+        const markerIdx = startBlock.indexOf('setSubscribePendingMarker(chatId,');
         const confirmPromptIdx = startBlock.indexOf('подтвердите свой номер');
-        assert.ok(bindTryIdx !== -1 && bindCatchEndIdx !== -1 && clearIdx !== -1 && confirmPromptIdx !== -1);
-        assert.ok(clearIdx > bindCatchEndIdx, 'clearClaimState must run after the bind try/catch, not before or inside it');
-        assert.ok(clearIdx < confirmPromptIdx, 'clearClaimState must run before the confirm-number prompt is sent');
+        assert.ok(bindTryIdx !== -1 && bindCatchEndIdx !== -1 && markerIdx !== -1 && confirmPromptIdx !== -1);
+        assert.ok(markerIdx > bindCatchEndIdx, 'setSubscribePendingMarker must run after the bind try/catch, not before or inside it');
+        assert.ok(markerIdx < confirmPromptIdx, 'setSubscribePendingMarker must run before the confirm-number prompt is sent');
     });
 
-    it('a failed/expired bind returns early (inside the catch block) without ever reaching clearClaimState — a stale-but-still-valid claim state must survive a failed subscribe attempt', () => {
+    it('a failed/expired bind returns early (inside the catch block) without ever reaching the marker call — a stale-but-still-valid claim state must survive a failed subscribe attempt', () => {
         const catchBlock = startBlock.slice(
             startBlock.indexOf('catch (error)'),
             startBlock.indexOf('catch (error)') + 300
         );
-        assert.ok(!catchBlock.includes('clearClaimState'));
+        assert.ok(!catchBlock.includes('setSubscribePendingMarker'));
         assert.match(catchBlock, /return;/);
     });
 
-    it('the clearClaimState call swallows its own errors (never lets a Supabase hiccup break the subscribe flow)', () => {
-        assert.match(startBlock, /clearClaimState\(chatId\)\.catch\(\(\)\s*=>\s*\{\}\)/);
+    it('the marker call swallows its own errors (never lets a Supabase hiccup break the subscribe flow)', () => {
+        assert.match(startBlock, /setSubscribePendingMarker\(chatId,\s*subscribePendingExpiresAt\)\.catch\(\(\)\s*=>\s*\{\}\)/);
+    });
+});
+
+describe('bot-claim.js — SUBSCRIBE_PENDING_STATE marker helpers', () => {
+    it('setSubscribePendingMarker clears any existing row (via clearClaimState) before inserting the new state, same one-row-per-telegram_id invariant as setClaimState', () => {
+        const block = content.slice(
+            content.indexOf('async function setSubscribePendingMarker'),
+            content.indexOf('async function getSubscribePendingMarker')
+        );
+        assert.match(block, /await clearClaimState\(telegramId\);/);
+        assert.match(block, /state:\s*SUBSCRIBE_PENDING_STATE/);
+    });
+
+    it('getSubscribePendingMarker treats a marker past its own expires_at as absent', () => {
+        const block = content.slice(content.indexOf('async function getSubscribePendingMarker'));
+        assert.match(block, /new Date\(expiresAt\)\.getTime\(\)\s*<=\s*Date\.now\(\)/);
+        assert.match(block, /return null;/);
+    });
+
+    it('SUBSCRIBE_PENDING_STATE is a distinct value from CLAIM_STATE, never confusable by getClaimState\'s own state=eq. filter', () => {
+        assert.match(content, /const SUBSCRIBE_PENDING_STATE = 'subscribe_pending_contact';/);
+        assert.notEqual('subscribe_pending_contact', 'waiting_for_ticket_claim_contact');
     });
 });
 

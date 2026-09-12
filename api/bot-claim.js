@@ -126,6 +126,71 @@ async function getClaimState(telegramId) {
   return Array.isArray(rows) && rows.length > 0 ? rows[0] : null;
 }
 
+// Written after a successful subscribe bind, in the SAME bot_user_states row
+// slot as CLAIM_STATE (setClaimState's own clear-then-insert already
+// guarantees at most one row per telegram_id, so writing this state
+// naturally clears any stale claim state too — see handleSubscribeStart).
+// This is a POSITIVE, persistent (survives across separate serverless
+// invocations, unlike an in-process variable) signal that a subscribe bind
+// genuinely just succeeded for this telegram id. Its only consumer is the
+// dispatcher's decision of what an AMBIGUOUS subscribe-check error should do
+// (see handler() below): if this marker is present, the dispatcher must NOT
+// fail open toward the claim flow, because doing so risks completing an
+// unrelated, older claim session instead of the genuinely-pending
+// subscription — exactly the misrouting this whole investigation started
+// from. If a later claim_/s_ link is opened, setClaimState's own
+// clear-then-insert overwrites this marker, consistent with "most recent
+// explicit action wins".
+const SUBSCRIBE_PENDING_STATE = 'subscribe_pending_contact';
+
+async function setSubscribePendingMarker(telegramId, expiresAt) {
+  const { supabaseUrl } = getConfig();
+  if (!supabaseUrl) throw new Error('SUPABASE_NOT_CONFIGURED');
+
+  await clearClaimState(telegramId);
+
+  const response = await fetch(`${supabaseUrl}/rest/v1/bot_user_states`, {
+    method: 'POST',
+    headers: {
+      ...supabaseHeaders(true),
+      Prefer: 'return=minimal'
+    },
+    body: JSON.stringify({
+      telegram_id: String(telegramId),
+      state: SUBSCRIBE_PENDING_STATE,
+      data: { expires_at: expiresAt }
+    })
+  });
+
+  if (!response.ok) {
+    throw new Error(`SUBSCRIBE_PENDING_MARKER_SAVE_FAILED_${response.status}`);
+  }
+}
+
+async function getSubscribePendingMarker(telegramId) {
+  const { supabaseUrl } = getConfig();
+  if (!supabaseUrl) return null;
+
+  const response = await fetch(
+    `${supabaseUrl}/rest/v1/bot_user_states?telegram_id=eq.${encodeURIComponent(String(telegramId))}&state=eq.${SUBSCRIBE_PENDING_STATE}&select=state,data&limit=1`,
+    { headers: supabaseHeaders(false) }
+  );
+
+  if (!response.ok) return null;
+  const rows = await response.json().catch(() => []);
+  const row = Array.isArray(rows) && rows.length > 0 ? rows[0] : null;
+  if (!row) return null;
+
+  // A marker past its own TTL is treated as absent — it's only meant to
+  // cover the short window between a bind and the immediately-following
+  // contact-share, not to fail-closed forever on an old, abandoned bind.
+  const expiresAt = row?.data?.expires_at;
+  if (expiresAt && new Date(expiresAt).getTime() <= Date.now()) {
+    return null;
+  }
+  return row;
+}
+
 function formatSeatNumbers(seatNumbers) {
   let seats = seatNumbers;
   if (typeof seats === 'string') {
@@ -335,18 +400,19 @@ async function handleSubscribeStart(message, rawToken) {
     return;
   }
 
-  // Defense in depth only — NOT the mechanism that keeps a later contact
-  // share from being misrouted into the old claim flow. That guarantee now
-  // comes structurally from the dispatcher checking for an active bound
-  // subscription session before it ever looks at claim state (see
-  // attemptSubscribeFromContact()'s comment). Clearing here just tidies up
-  // an abandoned claim-flow state promptly instead of waiting for its own
-  // TTL, so it's fine for this to fail silently: a successful bind is the
-  // user's most recent explicit action either way, consistent with the
-  // "most recent explicit action wins" principle already used backend-side
-  // via superseded_at. Only cleared on a successful bind — a failed/expired
-  // token must not destroy a possibly-still-valid claim state.
-  await clearClaimState(chatId).catch(() => {});
+  // Writes SUBSCRIBE_PENDING_STATE in place of any stale claim state (this
+  // is defense in depth for the claim-vs-subscribe RACE — not the primary
+  // mechanism, which is the dispatcher structurally checking for an active
+  // bound subscription session before it ever looks at claim state; see
+  // attemptSubscribeFromContact()'s comment). It ALSO leaves a positive,
+  // persistent marker the dispatcher can use to tell a genuinely-ambiguous
+  // subscribe-check error apart from "nothing to do with subscriptions at
+  // all" — see getSubscribePendingMarker()'s own comment. Fine to fail
+  // silently: a successful bind is the user's most recent explicit action
+  // either way. Only written on a successful bind — a failed/expired token
+  // must not destroy a possibly-still-valid claim state.
+  const subscribePendingExpiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString(); // mirrors SUBSCRIPTION_SESSION_TTL_MS backend-side
+  await setSubscribePendingMarker(chatId, subscribePendingExpiresAt).catch(() => {});
 
   await sendMessage(botToken, {
     chat_id: chatId,
@@ -610,12 +676,18 @@ export default async function handler(req, res) {
   //     generic handling) exactly as before.
   //   - subscribeOutcome === 'error' (an ambiguous/network failure) AND a
   //     claim state exists: fail OPEN toward the claim flow we already know
-  //     is genuinely active, rather than blocking it on an unrelated
-  //     backend's hiccup. This narrows the residual risk to the rare
-  //     three-way coincidence of a stale claim state, a genuinely active
-  //     subscription session, AND a subscribe-check failure all at once —
-  //     far better than making every ordinary claim contact-share depend on
-  //     the subscription backend's availability.
+  //     is genuinely active — UNLESS a persistent SUBSCRIBE_PENDING_STATE
+  //     marker shows a subscribe bind genuinely just succeeded for this
+  //     telegram id (see setSubscribePendingMarker()'s comment). That marker
+  //     means this contact-share is very likely a real, currently-ambiguous
+  //     subscription attempt, not stale claim litter — failing open in that
+  //     case would risk silently completing the WRONG (older, unrelated)
+  //     claim session instead, exactly the misrouting this whole
+  //     investigation started from. Without that marker, this narrows to
+  //     the rare coincidence of a stale claim state and a subscribe-check
+  //     failure with no evidence of a real subscribe attempt — far better
+  //     to fail open there than make every ordinary claim contact-share
+  //     depend on the subscription backend's availability.
   //   - subscribeOutcome === 'error' with no claim state: nothing to fail
   //     open to; attemptSubscribeFromContact already sent the user a
   //     generic retry message.
@@ -631,10 +703,17 @@ export default async function handler(req, res) {
 
     if (subscribeOutcome === 'error') {
       if (hasClaimState) {
-        await handleClaimContact(message, claimState);
+        const subscribePending = await getSubscribePendingMarker(message.chat.id).catch(() => null);
+        if (!subscribePending) {
+          await handleClaimContact(message, claimState);
+        }
+        // A subscribe-pending marker exists: do NOT fail open — this is
+        // very likely a real subscription attempt hitting an ambiguous
+        // error, not stale claim litter. attemptSubscribeFromContact
+        // already sent the user a generic retry message.
       }
-      // No claim state to fail open to: attemptSubscribeFromContact already
-      // sent the user a generic retry message — nothing else to do.
+      // No claim state to fail open to either way: attemptSubscribeFromContact
+      // already sent the user a generic retry message — nothing else to do.
       return res.status(200).json({ ok: true });
     }
 
