@@ -48,7 +48,7 @@ describe('PHASE E.45.2 — Bot claim success/pending message updates', () => {
 
     it('6. Both success and pending messages still carry the [ 🎫 Мои поездки ] button', () => {
         // Phase: Manual Booking Subscription Model added a 3rd inline_keyboard
-        // (handleSubscribeContact's success message) with the same button.
+        // (attemptSubscribeFromContact's success message) with the same button.
         const inlineKeyboards = content.match(/inline_keyboard:\s*\[\[[\s\S]*?\]\]/g) || [];
         assert.strictEqual(inlineKeyboards.length, 3, 'claimed + pending + subscription-success inline keyboards');
         for (const ik of inlineKeyboards) {

@@ -6,7 +6,16 @@
  * Source-level checks in the same style as phase_e44_bot_claim_cta.test.js /
  * phase_e45_2_bot_claim_messages.test.js (this repo's established
  * convention for auditing api/bot-claim.js), plus direct unit tests of the
- * real parseDeepLink() for the new subscribe_ prefix.
+ * real parseDeepLink() for the subscribe_ prefix.
+ *
+ * Architecture under test (bind-then-complete-by-telegram-id): the raw
+ * session token from a subscribe_<token> deep link is presented to the
+ * backend exactly once, at /start time, via POST /claims/bot/subscribe/bind
+ * — and is never written to any bot-side table (not bot_user_states, not a
+ * dedicated bot_subscription_states table, which no longer exists at all).
+ * From then on the pending subscription is addressed purely by the
+ * Telegram-authenticated sender's id, so the contact-share step calls
+ * POST /claims/bot/subscribe with no session token/id whatsoever.
  */
 
 import { describe, it } from 'node:test';
@@ -48,22 +57,97 @@ describe('parseDeepLink — subscribe_ prefix', () => {
     });
 });
 
-describe('bot-claim.js — subscription state isolation from claim state', () => {
-    it('SUBSCRIBE_STATE is a distinct constant value from CLAIM_STATE', () => {
-        assert.match(content, /const CLAIM_STATE = 'waiting_for_ticket_claim_contact'/);
-        assert.match(content, /const SUBSCRIBE_STATE = 'waiting_for_subscription_contact'/);
+describe('bot-claim.js — raw token is NEVER persisted anywhere after bind', () => {
+    it('bot_subscription_states no longer exists anywhere in the file (the old raw-token-storage design is fully removed)', () => {
+        assert.ok(!content.includes('bot_subscription_states'));
     });
 
-    it('subscription state reads/writes hit the bot_subscription_states REST path, never bot_user_states', () => {
-        const subscriptionStateBlock = content.slice(
-            content.indexOf('async function clearSubscriptionState'),
-            content.indexOf('async function handleSubscribeStart')
+    it('SUBSCRIBE_STATE / setSubscriptionState / getSubscriptionState / clearSubscriptionState are all gone', () => {
+        assert.ok(!content.includes('SUBSCRIBE_STATE'));
+        assert.ok(!/function setSubscriptionState/.test(content));
+        assert.ok(!/function getSubscriptionState/.test(content));
+        assert.ok(!/function clearSubscriptionState/.test(content));
+    });
+
+    it('handleSubscribeStart calls the bind endpoint, not any Supabase REST write, with the raw token', () => {
+        const block = content.slice(
+            content.indexOf('async function handleSubscribeStart'),
+            content.indexOf('async function attemptSubscribeFromContact')
         );
-        // Checking the actual REST URL fragments (not a bare word search),
-        // since the block's own explanatory comment mentions bot_user_states
-        // in prose while comparing risk profiles.
-        assert.ok(subscriptionStateBlock.includes('/rest/v1/bot_subscription_states'));
-        assert.ok(!subscriptionStateBlock.includes('/rest/v1/bot_user_states'));
+        assert.ok(block.includes("backendPost('/claims/bot/subscribe/bind'"));
+        assert.ok(block.includes('sessionToken: rawToken'));
+        assert.ok(block.includes('telegramId: chatId'));
+        assert.ok(!block.includes('/rest/v1/'));
+    });
+
+    it('the raw token variable (rawToken) never appears outside handleSubscribeStart\'s own function body', () => {
+        const startBlock = content.slice(
+            content.indexOf('async function handleSubscribeStart'),
+            content.indexOf('async function attemptSubscribeFromContact')
+        );
+        const restOfFile = content.slice(0, content.indexOf('async function handleSubscribeStart'))
+            + content.slice(content.indexOf('async function attemptSubscribeFromContact'));
+        // handleSubscribeStart's own parameter name is "rawToken" (fine, it's
+        // a local parameter, scoped to this function only) — what must NOT
+        // happen is any OTHER function reading/writing a field/column named
+        // rawToken/session_token, since there is no longer anywhere for it
+        // to persist to.
+        assert.ok(startBlock.includes('rawToken'));
+        assert.ok(!restOfFile.includes('session_token'));
+    });
+
+    it('never logs the raw session token (no console.* call anywhere in bot-claim.js)', () => {
+        assert.ok(!/console\.(log|error|warn|info)/.test(content));
+    });
+});
+
+describe('bot-claim.js — attemptSubscribeFromContact takes no session token/id', () => {
+    it('the request body to /claims/bot/subscribe carries only telegramUser/telegramContact, never a session token or id', () => {
+        const block = content.slice(
+            content.indexOf('async function attemptSubscribeFromContact'),
+            content.indexOf('async function handleUnsubscribeCommand')
+        );
+        assert.ok(block.includes("backendPost('/claims/bot/subscribe'"));
+        assert.ok(!block.includes('sessionToken'));
+        assert.ok(!block.includes('sessionId'));
+    });
+
+    it('rejects a contact whose user_id differs from the sender before ever calling the backend', () => {
+        const block = content.slice(
+            content.indexOf('async function attemptSubscribeFromContact'),
+            content.indexOf('async function handleUnsubscribeCommand')
+        );
+        assert.match(block, /String\(contact\.user_id\)\s*!==\s*String\(sender\.id\)/);
+        assert.match(block, /return false;/);
+    });
+
+    it('never calls /claims/bot/verify-and-claim (that is the separate, untouched online-claim flow)', () => {
+        const block = content.slice(
+            content.indexOf('async function attemptSubscribeFromContact'),
+            content.indexOf('async function handleUnsubscribeCommand')
+        );
+        assert.ok(!block.includes('verify-and-claim'));
+    });
+
+    it('SESSION_INVALID_EXPIRED_OR_CONSUMED and FEATURE_DISABLED both fall through silently (return false), only BOOKING_NOT_SUBSCRIBABLE is reportable', () => {
+        const block = content.slice(
+            content.indexOf('async function attemptSubscribeFromContact'),
+            content.indexOf('async function handleUnsubscribeCommand')
+        );
+        assert.match(block, /reportableCodes\s*=\s*new Set\(\['BOOKING_NOT_SUBSCRIBABLE'\]\)/);
+        assert.match(block, /if\s*\(!reportableCodes\.has\(error\.code\)\)\s*\{\s*return false;/);
+    });
+});
+
+describe('bot-claim.js — dispatcher wiring', () => {
+    it('the dispatcher checks claim state first, then opportunistically attempts subscribe, before falling back to generic contact handling', () => {
+        const dispatchBlock = content.slice(content.indexOf('// 2. Process Contact Sharing'));
+        const claimIdx = dispatchBlock.indexOf('getClaimState(message.chat.id)');
+        const subscribeIdx = dispatchBlock.indexOf('attemptSubscribeFromContact(message)');
+        const genericIdx = dispatchBlock.indexOf('handleGenericContact(message)');
+        assert.ok(claimIdx !== -1 && subscribeIdx !== -1 && genericIdx !== -1);
+        assert.ok(claimIdx < subscribeIdx);
+        assert.ok(subscribeIdx < genericIdx);
     });
 
     it('claim state functions still target only bot_user_states (untouched)', () => {
@@ -73,36 +157,6 @@ describe('bot-claim.js — subscription state isolation from claim state', () =>
         );
         assert.ok(claimStateBlock.includes('bot_user_states'));
         assert.ok(!claimStateBlock.includes('bot_subscription_states'));
-    });
-
-    it('the dispatcher checks claim state and subscription state as two independent lookups, not a shared clear', () => {
-        const dispatchBlock = content.slice(content.indexOf('// 2. Process Contact Sharing'));
-        assert.match(dispatchBlock, /getClaimState\(message\.chat\.id\)/);
-        assert.match(dispatchBlock, /getSubscriptionState\(message\.chat\.id\)/);
-    });
-});
-
-describe('bot-claim.js — subscribe contact handling mirrors the claim flow\'s anti-spoof guard', () => {
-    it('handleSubscribeContact rejects a contact whose user_id differs from the sender', () => {
-        const block = content.slice(
-            content.indexOf('async function handleSubscribeContact'),
-            content.indexOf('async function handleUnsubscribeCommand')
-        );
-        assert.match(block, /String\(contact\.user_id\)\s*!==\s*String\(sender\.id\)/);
-        assert.ok(block.includes('Пересланный контакт не подходит'));
-    });
-
-    it('handleSubscribeContact calls /claims/bot/subscribe, never /claims/bot/verify-and-claim', () => {
-        const block = content.slice(
-            content.indexOf('async function handleSubscribeContact'),
-            content.indexOf('async function handleUnsubscribeCommand')
-        );
-        assert.ok(block.includes("backendPost('/claims/bot/subscribe'"));
-        assert.ok(!block.includes('verify-and-claim'));
-    });
-
-    it('never logs the raw session token (no console.* call anywhere in bot-claim.js)', () => {
-        assert.ok(!/console\.(log|error|warn|info)/.test(content));
     });
 });
 

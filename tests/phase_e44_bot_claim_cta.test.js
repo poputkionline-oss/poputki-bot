@@ -35,7 +35,7 @@ describe('PHASE E.44 — BOT CLAIM CTA AUDIT & INLINE BUTTON TESTS', () => {
     it('5. Button is a read-only Telegram Web App launcher: no booking creation, no ownership transfer', () => {
         // The inline keyboard uses web_app, not a callback_query that executes server-side claim mutation
         // Phase: Manual Booking Subscription Model added a 3rd inline_keyboard
-        // (handleSubscribeContact's success message) — same safe web_app
+        // (attemptSubscribeFromContact's success message) — same safe web_app
         // pattern, still asserted below for every occurrence found.
         const inlineKeyboards = content.match(/inline_keyboard:\s*\[\[[\s\S]*?\]\]/g) || [];
         assert.strictEqual(inlineKeyboards.length, 3);
