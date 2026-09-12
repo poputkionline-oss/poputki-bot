@@ -135,7 +135,11 @@ describe('bot-claim.js — attemptSubscribeFromContact takes no session token/id
             content.indexOf('async function handleUnsubscribeCommand')
         );
         assert.match(block, /notPendingCodes\s*=\s*new Set\(\['FEATURE_DISABLED',\s*'SESSION_INVALID_EXPIRED_OR_CONSUMED'\]\)/);
-        assert.match(block, /if\s*\(notPendingCodes\.has\(error\.code\)\)\s*\{\s*return 'not_pending';/);
+        const notPendingBranch = block.slice(
+            block.indexOf('if (notPendingCodes.has(error.code))'),
+            block.indexOf('if (notPendingCodes.has(error.code))') + 300
+        );
+        assert.match(notPendingBranch, /return 'not_pending';/);
         assert.match(block, /error\.code === 'BOOKING_NOT_SUBSCRIBABLE'/);
         assert.match(block, /return 'consumed';/);
         assert.match(block, /return 'error';/);
@@ -145,20 +149,38 @@ describe('bot-claim.js — attemptSubscribeFromContact takes no session token/id
 });
 
 describe('bot-claim.js — dispatcher wiring', () => {
-    it('the dispatcher attempts subscribe FIRST, unconditionally, and only checks claim state once the outcome is not_pending, before falling back to generic contact handling', () => {
-        const dispatchBlock = content.slice(content.indexOf('// 2. Process Contact Sharing'));
+    const dispatchBlock = content.slice(content.indexOf('// 2. Process Contact Sharing'), content.lastIndexOf('return baseHandler(req, res);'));
+
+    it('reads claim state first, then always attempts the subscribe check regardless of whether claim state exists', () => {
+        const claimReadIdx = dispatchBlock.indexOf('getClaimState(message.chat.id)');
+        const hasClaimStateIdx = dispatchBlock.indexOf("hasClaimState = claimState?.state === CLAIM_STATE");
         const subscribeIdx = dispatchBlock.indexOf('attemptSubscribeFromContact(message)');
-        const notPendingCheckIdx = dispatchBlock.indexOf("subscribeOutcome !== 'not_pending'");
-        const claimIdx = dispatchBlock.indexOf('getClaimState(message.chat.id)');
-        const genericIdx = dispatchBlock.indexOf('handleGenericContact(message)');
-        assert.ok(subscribeIdx !== -1 && notPendingCheckIdx !== -1 && claimIdx !== -1 && genericIdx !== -1);
-        assert.ok(subscribeIdx < notPendingCheckIdx);
-        assert.ok(notPendingCheckIdx < claimIdx);
-        assert.ok(claimIdx < genericIdx);
+        assert.ok(claimReadIdx !== -1 && hasClaimStateIdx !== -1 && subscribeIdx !== -1);
+        assert.ok(claimReadIdx < hasClaimStateIdx);
+        assert.ok(hasClaimStateIdx < subscribeIdx);
+    });
+
+    it('a "consumed" outcome always stops the dispatcher, regardless of claim state', () => {
+        const consumedIdx = dispatchBlock.indexOf("subscribeOutcome === 'consumed'");
+        assert.ok(consumedIdx !== -1);
+    });
+
+    it('an "error" outcome fails OPEN toward an already-active claim conversation instead of blocking it', () => {
+        const errorBlockIdx = dispatchBlock.indexOf("if (subscribeOutcome === 'error')");
+        const errorBlock = dispatchBlock.slice(errorBlockIdx, errorBlockIdx + 300);
+        assert.match(errorBlock, /if\s*\(hasClaimState\)\s*\{\s*await handleClaimContact\(message, claimState\);/);
+    });
+
+    it('"not_pending" still runs the claim flow when claim state exists, or generic handling otherwise', () => {
+        const notPendingIdx = dispatchBlock.indexOf("// subscribeOutcome === 'not_pending'");
+        const afterNotPending = dispatchBlock.slice(notPendingIdx);
+        const claimCallIdx = afterNotPending.indexOf('handleClaimContact(message, claimState)');
+        const genericIdx = afterNotPending.indexOf('handleGenericContact(message)');
+        assert.ok(claimCallIdx !== -1 && genericIdx !== -1);
+        assert.ok(claimCallIdx < genericIdx);
     });
 
     it('attemptSubscribeFromContact is called without a blanket .catch() that could mask a real error as "nothing pending"', () => {
-        const dispatchBlock = content.slice(content.indexOf('// 2. Process Contact Sharing'), content.indexOf('return baseHandler(req, res);'));
         assert.ok(!/attemptSubscribeFromContact\(message\)\.catch/.test(dispatchBlock));
     });
 

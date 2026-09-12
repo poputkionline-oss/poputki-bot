@@ -4,24 +4,27 @@
  * POPUTKI.ONLINE — Manual Booking Telegram Subscription Model.
  *
  * Executable (not source-regex) regression coverage for the real dispatcher
- * order in api/bot-claim.js's default handler(): a contact-share must be
- * offered to the subscription flow FIRST, unconditionally, and the legacy
- * claim flow (bot_user_states) must only ever be consulted once the backend
- * has positively confirmed nothing is pending for that telegram id.
+ * order in api/bot-claim.js's default handler().
  *
- * This exists because a second production incident on booking_id=486 showed
- * a contact-share still reaching the old claim/mismatch flow after an
- * earlier fix (clearing claim state on successful subscribe bind) had
+ * History: a second production incident on booking_id=486 showed a
+ * contact-share still reaching the old claim/mismatch flow after an earlier
+ * fix (clearing claim state on successful subscribe bind, e0b9d62) had
  * already been deployed — that fix only closed the specific case where the
  * SAME /start subscribe_<token> request that bound the session also cleared
- * the stale state; it did nothing for a state written or refreshed AFTER
- * the bind (e.g. a claim_/s_ deep link opened after the subscribe bind, but
- * before the contact is shared). The dispatcher itself must not depend on
- * bot_user_states having been cleared at all.
+ * the stale state. The follow-up fix (9bf0192) made the subscription check
+ * run before ANY claim-state check, closing that race — but a review of
+ * that commit found it made the ordinary, already-working legacy claim flow
+ * depend on the subscription backend being reachable at all, which it never
+ * did before: a network hiccup checking for an active subscription session
+ * would show a generic error instead of ever running the claim flow, even
+ * for a contact share that had nothing to do with subscriptions.
  *
- * These tests exercise the real handler() by stubbing global.fetch, so they
- * fail if the source is ever reverted to checking claim state before (or
- * instead of) an active subscription session.
+ * The current design (this file) restores that independence: claim state is
+ * read first (cheap, always was), the subscription check still always runs
+ * (so an active session still wins the race), but an ambiguous/error
+ * outcome from the subscription check now fails OPEN toward an
+ * already-active claim conversation instead of blocking it — only a
+ * definitive 'not_pending' or 'consumed' answer changes what runs.
  */
 
 import { describe, it, beforeEach, afterEach } from 'node:test';
@@ -99,16 +102,31 @@ const TELEGRAM_SEND_ROUTE = {
     respond: () => jsonResponse(200, { ok: true, result: {} })
 };
 
+const CLAIM_STATE_GET_ROUTE = (sessionId = 'real-claim-session') => ({
+    match: (url, opts) => url.includes('/rest/v1/bot_user_states') && (!opts.method || opts.method === 'GET'),
+    respond: () => jsonResponse(200, [{ state: 'waiting_for_ticket_claim_contact', data: { session_id: sessionId, expires_at: '2026-09-13T00:00:00Z' } }])
+});
+
+const NO_CLAIM_STATE_GET_ROUTE = {
+    match: (url, opts) => url.includes('/rest/v1/bot_user_states') && (!opts.method || opts.method === 'GET'),
+    respond: () => jsonResponse(200, [])
+};
+
+const CLAIM_STATE_DELETE_ROUTE = {
+    match: (url, opts) => url.includes('/rest/v1/bot_user_states') && opts.method === 'DELETE',
+    respond: () => jsonResponse(200, {})
+};
+
 describe('bot-claim.js handler() — real dispatcher order via contact-share', () => {
-    let handler;
+    let handler, resetCache;
 
     beforeEach(async () => {
         setTestEnv();
-        // Fresh module registry isn't available without --experimental-vm-modules
-        // tricks; bot-claim.js has no top-level env reads, so re-using the
-        // cached import across tests is safe as long as each test installs
-        // its own global.fetch before calling handler().
-        ({ default: handler } = await import('../api/bot-claim.js'));
+        // ES module imports are cached, so the module-level FEATURE_DISABLED
+        // cache in attemptSubscribeFromContact would otherwise leak between
+        // test cases in this file — reset it explicitly every time.
+        ({ default: handler, __resetSubscribeCheckCacheForTests: resetCache } = await import('../api/bot-claim.js'));
+        resetCache();
     });
 
     afterEach(() => {
@@ -116,23 +134,16 @@ describe('bot-claim.js handler() — real dispatcher order via contact-share', (
         restoreEnv();
     });
 
-    it('RACE: a stale claim state AND an active bound subscription session both exist — the contact completes the subscription; bot_user_states is never even queried; /claims/bot/verify-and-claim (old claim flow) is never called', async () => {
+    it('RACE: a stale claim state AND an active bound subscription session both exist — the contact completes the subscription; /claims/bot/verify-and-claim (old claim flow) is never called', async () => {
         const fetchMock = makeFetchMock([
             TELEGRAM_SEND_ROUTE,
+            CLAIM_STATE_GET_ROUTE('stale-session-id'),
             {
                 match: (url, opts) => url.includes('/claims/bot/subscribe') && opts.method === 'POST',
                 respond: () => jsonResponse(200, {
                     success: true,
                     trip: { fromCity: 'Душанбе', toCity: 'Худжанд', departureDate: '2026-09-20', departureTime: '08:00:00', seatNumbers: '[12]' }
                 })
-            },
-            {
-                // If the dispatcher regresses to checking claim state first,
-                // this would return a stale-but-real claim row — proving the
-                // race is genuinely present in this test, not absent by
-                // construction.
-                match: (url, opts) => url.includes('/rest/v1/bot_user_states') && (!opts.method || opts.method === 'GET'),
-                respond: () => jsonResponse(200, [{ state: 'waiting_for_ticket_claim_contact', data: { session_id: 'stale-session-id', expires_at: '2026-09-13T00:00:00Z' } }])
             },
             {
                 match: (url) => url.includes('/claims/bot/verify-and-claim'),
@@ -146,7 +157,6 @@ describe('bot-claim.js handler() — real dispatcher order via contact-share', (
 
         assert.equal(res.statusCode, 200);
         assert.ok(fetchMock.calledWith('/claims/bot/subscribe'), 'subscription endpoint must be called');
-        assert.ok(!fetchMock.calledWith('/rest/v1/bot_user_states'), 'bot_user_states must never be queried once the subscription flow consumes the contact');
         assert.ok(!fetchMock.calledWith('/claims/bot/verify-and-claim'), 'legacy claim endpoint must never be called');
 
         const sendCall = fetchMock.calls.find(c => c.url.includes('/sendMessage'));
@@ -156,17 +166,11 @@ describe('bot-claim.js handler() — real dispatcher order via contact-share', (
     it('normal claim_/s_ scenario: no active subscription session (backend reports FEATURE_DISABLED) — falls through to the legacy claim flow exactly as before', async () => {
         const fetchMock = makeFetchMock([
             TELEGRAM_SEND_ROUTE,
+            CLAIM_STATE_GET_ROUTE('real-claim-session'),
+            CLAIM_STATE_DELETE_ROUTE,
             {
                 match: (url, opts) => url.includes('/claims/bot/subscribe') && opts.method === 'POST',
                 respond: () => jsonResponse(404, { error: 'NOT_FOUND', code: 'FEATURE_DISABLED' })
-            },
-            {
-                match: (url, opts) => url.includes('/rest/v1/bot_user_states') && (!opts.method || opts.method === 'GET'),
-                respond: () => jsonResponse(200, [{ state: 'waiting_for_ticket_claim_contact', data: { session_id: 'real-claim-session', expires_at: '2026-09-13T00:00:00Z' } }])
-            },
-            {
-                match: (url, opts) => url.includes('/rest/v1/bot_user_states') && opts.method === 'DELETE',
-                respond: () => jsonResponse(200, {})
             },
             {
                 match: (url, opts) => url.includes('/claims/bot/verify-and-claim') && opts.method === 'POST',
@@ -179,8 +183,7 @@ describe('bot-claim.js handler() — real dispatcher order via contact-share', (
         await handler({ method: 'POST', body: { message: makeContactMessage() } }, res);
 
         assert.equal(res.statusCode, 200);
-        assert.ok(fetchMock.calledWith('/claims/bot/subscribe'), 'subscription check must still run first');
-        assert.ok(fetchMock.calledWith('/rest/v1/bot_user_states'), 'claim state must be consulted once subscribe reports not_pending');
+        assert.ok(fetchMock.calledWith('/claims/bot/subscribe'), 'subscription check must still run');
         assert.ok(fetchMock.calledWith('/claims/bot/verify-and-claim'), 'legacy claim flow must still complete normally');
 
         const sendCalls = fetchMock.calls.filter(c => c.url.includes('/sendMessage'));
@@ -188,20 +191,18 @@ describe('bot-claim.js handler() — real dispatcher order via contact-share', (
         assert.ok(finalMessage.body.text.includes('Билет успешно добавлен'), 'user must see the claim-success message');
     });
 
-    it('an ambiguous/unmapped backend error from the subscribe check must NOT be silently treated as not_pending — the legacy claim flow is never consulted even though a claim state exists', async () => {
+    it('RELIABILITY: an ambiguous/network error from the subscribe check must NOT block an already-active claim conversation — fails open to the claim flow', async () => {
         const fetchMock = makeFetchMock([
             TELEGRAM_SEND_ROUTE,
+            CLAIM_STATE_GET_ROUTE('real-claim-session'),
+            CLAIM_STATE_DELETE_ROUTE,
             {
                 match: (url, opts) => url.includes('/claims/bot/subscribe') && opts.method === 'POST',
                 respond: () => jsonResponse(500, { error: 'Не удалось добавить билет в Telegram', code: 'SUBSCRIBE_FAILED' })
             },
             {
-                match: (url) => url.includes('/rest/v1/bot_user_states'),
-                respond: () => { throw new Error('claim state must never be consulted on an ambiguous subscribe-check error'); }
-            },
-            {
-                match: (url) => url.includes('/claims/bot/verify-and-claim'),
-                respond: () => { throw new Error('claim flow must never run on an ambiguous subscribe-check error'); }
+                match: (url, opts) => url.includes('/claims/bot/verify-and-claim') && opts.method === 'POST',
+                respond: () => jsonResponse(200, { status: 'claimed' })
             }
         ]);
         global.fetch = fetchMock;
@@ -210,24 +211,48 @@ describe('bot-claim.js handler() — real dispatcher order via contact-share', (
         await handler({ method: 'POST', body: { message: makeContactMessage() } }, res);
 
         assert.equal(res.statusCode, 200);
-        assert.ok(fetchMock.calledWith('/claims/bot/subscribe'));
-        assert.ok(!fetchMock.calledWith('/rest/v1/bot_user_states'));
-        assert.ok(!fetchMock.calledWith('/claims/bot/verify-and-claim'));
+        assert.ok(fetchMock.calledWith('/claims/bot/subscribe'), 'subscription check must still be attempted');
+        assert.ok(fetchMock.calledWith('/claims/bot/verify-and-claim'), 'an ambiguous subscribe-check error must fail OPEN toward the already-active claim flow, not block it');
 
-        const sendCall = fetchMock.calls.find(c => c.url.includes('/sendMessage'));
-        assert.ok(sendCall.body.text.includes('Попробуйте ещё раз'), 'user must see a generic retry message, not silence and not a misrouted claim message');
+        const sendCalls = fetchMock.calls.filter(c => c.url.includes('/sendMessage'));
+        const finalMessage = sendCalls[sendCalls.length - 1];
+        assert.ok(finalMessage.body.text.includes('Билет успешно добавлен'), 'user must see the claim flow complete normally despite the subscribe-check error');
     });
 
-    it('BOOKING_NOT_SUBSCRIBABLE from an active session is reported directly — the legacy claim flow is never consulted', async () => {
+    it('an ambiguous/network error from the subscribe check with NO claim state to fail open to just shows the generic retry message', async () => {
         const fetchMock = makeFetchMock([
             TELEGRAM_SEND_ROUTE,
+            NO_CLAIM_STATE_GET_ROUTE,
+            {
+                match: (url, opts) => url.includes('/claims/bot/subscribe') && opts.method === 'POST',
+                respond: () => jsonResponse(500, { error: 'Не удалось добавить билет в Telegram', code: 'SUBSCRIBE_FAILED' })
+            },
+            {
+                match: (url) => url.includes('/claims/bot/verify-and-claim'),
+                respond: () => { throw new Error('there is no claim state here — the claim endpoint must never be called'); }
+            }
+        ]);
+        global.fetch = fetchMock;
+
+        const res = makeRes();
+        await handler({ method: 'POST', body: { message: makeContactMessage() } }, res);
+
+        assert.equal(res.statusCode, 200);
+        const sendCall = fetchMock.calls.find(c => c.url.includes('/sendMessage'));
+        assert.ok(sendCall.body.text.includes('Попробуйте ещё раз'), 'user must see a generic retry message');
+    });
+
+    it('BOOKING_NOT_SUBSCRIBABLE from an active session is reported directly — the legacy claim flow is never consulted even if claim state exists', async () => {
+        const fetchMock = makeFetchMock([
+            TELEGRAM_SEND_ROUTE,
+            CLAIM_STATE_GET_ROUTE('real-claim-session'),
             {
                 match: (url, opts) => url.includes('/claims/bot/subscribe') && opts.method === 'POST',
                 respond: () => jsonResponse(400, { error: 'Не удалось создать сессию подписки', code: 'BOOKING_NOT_SUBSCRIBABLE' })
             },
             {
-                match: (url) => url.includes('/rest/v1/bot_user_states'),
-                respond: () => { throw new Error('claim state must never be consulted when an active session was found but not subscribable'); }
+                match: (url) => url.includes('/claims/bot/verify-and-claim'),
+                respond: () => { throw new Error('claim flow must never be consulted when an active session was found but not subscribable'); }
             }
         ]);
         global.fetch = fetchMock;
@@ -236,8 +261,37 @@ describe('bot-claim.js handler() — real dispatcher order via contact-share', (
         await handler({ method: 'POST', body: { message: makeContactMessage() } }, res);
 
         assert.equal(res.statusCode, 200);
-        assert.ok(!fetchMock.calledWith('/rest/v1/bot_user_states'));
         const sendCall = fetchMock.calls.find(c => c.url.includes('/sendMessage'));
         assert.ok(sendCall.body.text.includes('больше недоступна для подписки'));
+    });
+
+    it('CACHE: once the backend reports FEATURE_DISABLED, a second contact share within the TTL never calls the subscribe endpoint again, but still runs the claim flow normally', async () => {
+        let subscribeCalls = 0;
+        const fetchMock = makeFetchMock([
+            TELEGRAM_SEND_ROUTE,
+            CLAIM_STATE_GET_ROUTE('real-claim-session'),
+            CLAIM_STATE_DELETE_ROUTE,
+            {
+                match: (url, opts) => url.includes('/claims/bot/subscribe') && opts.method === 'POST',
+                respond: () => { subscribeCalls++; return jsonResponse(404, { error: 'NOT_FOUND', code: 'FEATURE_DISABLED' }); }
+            },
+            {
+                match: (url, opts) => url.includes('/claims/bot/verify-and-claim') && opts.method === 'POST',
+                respond: () => jsonResponse(200, { status: 'claimed' })
+            }
+        ]);
+        global.fetch = fetchMock;
+
+        const res1 = makeRes();
+        await handler({ method: 'POST', body: { message: makeContactMessage({ chatId: 111, userId: 111 }) } }, res1);
+        assert.equal(subscribeCalls, 1, 'first call must hit the real backend');
+
+        const res2 = makeRes();
+        await handler({ method: 'POST', body: { message: makeContactMessage({ chatId: 222, userId: 222 }) } }, res2);
+        assert.equal(subscribeCalls, 1, 'second call within the TTL must be answered from the in-process cache, not a second network call');
+        assert.equal(res2.statusCode, 200);
+
+        const sendCalls = fetchMock.calls.filter(c => c.url.includes('/sendMessage'));
+        assert.ok(sendCalls[sendCalls.length - 1].body.text.includes('Билет успешно добавлен'), 'the claim flow must still complete normally on the cached path');
     });
 });
