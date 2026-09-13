@@ -191,6 +191,17 @@ async function getSubscribePendingMarker(telegramId) {
   return row;
 }
 
+// Clears whatever single bot_user_states row exists for this telegram_id
+// (setClaimState/setSubscribePendingMarker's own clear-then-insert already
+// guarantees at most one row per telegram_id — see SUBSCRIBE_PENDING_STATE's
+// comment above). Named separately from clearClaimState so a successful
+// subscribe completion's cleanup reads for what it actually is — clearing
+// the subscribe_pending_contact marker — not "clearing claim state" on a
+// flow that was never a claim. Same underlying DELETE either way.
+async function clearSubscribePendingMarker(telegramId) {
+  return clearClaimState(telegramId);
+}
+
 function formatSeatNumbers(seatNumbers) {
   let seats = seatNumbers;
   if (typeof seats === 'string') {
@@ -548,9 +559,20 @@ async function attemptSubscribeFromContact(message) {
     return 'error';
   }
 
+  // Only reached once the backend has confirmed the subscribe/follow
+  // request succeeded (the try block above returned without throwing) — the
+  // marker is cleared here, after that confirmed success, never before or
+  // on any error path. A failure clearing it must not undo the subscription
+  // that already succeeded on the backend, so it is swallowed exactly like
+  // every other best-effort bot_user_states cleanup in this file; there is
+  // nothing to log here (no tokens, phone numbers, or other PII ever touch
+  // this call), consistent with this file's existing no-console-calls
+  // convention for this class of non-blocking cleanup.
+  await clearSubscribePendingMarker(chatId).catch(() => {});
+
   const trip = result.trip || {};
   const summary = [
-    '✅ Билет добавлен в Telegram.',
+    '✅ Вы подписались на уведомления по этой поездке.',
     trip.fromCity ? `🚌 Маршрут: ${trip.fromCity} → ${trip.toCity || '—'}` : null,
     trip.departureDate ? `🗓 Отправление: ${formatDeparture(trip.departureDate, trip.departureTime)}` : null,
     trip.seatNumbers ? `💺 Место: ${formatSeatNumbers(trip.seatNumbers)}` : null,

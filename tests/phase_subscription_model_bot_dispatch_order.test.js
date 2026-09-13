@@ -157,6 +157,7 @@ describe('bot-claim.js handler() — real dispatcher order via contact-share', (
         const fetchMock = makeFetchMock([
             TELEGRAM_SEND_ROUTE,
             CLAIM_STATE_GET_ROUTE('stale-session-id'),
+            CLAIM_STATE_DELETE_ROUTE,
             {
                 match: (url, opts) => url.includes('/claims/bot/subscribe') && opts.method === 'POST',
                 respond: () => jsonResponse(200, {
@@ -179,7 +180,16 @@ describe('bot-claim.js handler() — real dispatcher order via contact-share', (
         assert.ok(!fetchMock.calledWith('/claims/bot/verify-and-claim'), 'legacy claim endpoint must never be called');
 
         const sendCall = fetchMock.calls.find(c => c.url.includes('/sendMessage'));
-        assert.ok(sendCall.body.text.includes('Билет добавлен в Telegram'), 'user must see the subscribe-success message, not a claim message');
+        assert.ok(sendCall.body.text.includes('Вы подписались на уведомления по этой поездке'), 'user must see the subscribe-success message, not a claim message');
+
+        // A successful subscribe completion must clear the
+        // subscribe_pending_contact marker (and any other leftover
+        // bot_user_states row for this telegram id) — not leave it lingering
+        // after the flow it guarded has already finished.
+        assert.ok(
+            fetchMock.calls.some(c => c.url.includes('/rest/v1/bot_user_states') && c.method === 'DELETE'),
+            'a successful subscribe completion must clear the bot_user_states row for this telegram id'
+        );
     });
 
     it('normal claim_/s_ scenario: no active subscription session (backend reports FEATURE_DISABLED) — falls through to the legacy claim flow exactly as before', async () => {
@@ -340,5 +350,60 @@ describe('bot-claim.js handler() — real dispatcher order via contact-share', (
 
         const sendCalls = fetchMock.calls.filter(c => c.url.includes('/sendMessage'));
         assert.ok(sendCalls[sendCalls.length - 1].body.text.includes('Билет успешно добавлен'), 'the claim flow must still complete normally on the cached path');
+    });
+
+    it('IDEMPOTENCY: a second contact share after a completed subscription (backend now reports the session consumed) never re-completes it and never touches the claim flow', async () => {
+        let subscribeCalls = 0;
+        const fetchMock = makeFetchMock([
+            TELEGRAM_SEND_ROUTE,
+            NO_CLAIM_STATE_GET_ROUTE,
+            CLAIM_STATE_DELETE_ROUTE,
+            {
+                match: (url, opts) => url.includes('/claims/bot/subscribe') && opts.method === 'POST',
+                respond: () => {
+                    subscribeCalls++;
+                    if (subscribeCalls === 1) {
+                        return jsonResponse(200, {
+                            success: true,
+                            trip: { fromCity: 'Душанбе', toCity: 'Худжанд', departureDate: '2026-09-20', departureTime: '08:00:00', seatNumbers: '[12]' }
+                        });
+                    }
+                    // Same telegram id shares contact again: the backend's
+                    // own hasPendingSubscription check now finds the session
+                    // already consumed by the first, successful completion.
+                    return jsonResponse(400, { error: 'Нет активной сессии подписки', code: 'SESSION_INVALID_EXPIRED_OR_CONSUMED' });
+                }
+            },
+            {
+                match: (url) => url.includes('/claims/bot/verify-and-claim'),
+                respond: () => { throw new Error('there is no claim state in this scenario — the claim endpoint must never be called'); }
+            }
+        ]);
+        global.fetch = fetchMock;
+
+        const message = makeContactMessage({ chatId: 777, userId: 777 });
+
+        const res1 = makeRes();
+        await handler({ method: 'POST', body: { message } }, res1);
+        assert.equal(res1.statusCode, 200);
+        const firstSend = fetchMock.calls.filter(c => c.url.includes('/sendMessage')).pop();
+        assert.ok(firstSend.body.text.includes('Вы подписались на уведомления по этой поездке'), 'first share completes the subscription');
+
+        const res2 = makeRes();
+        await handler({ method: 'POST', body: { message } }, res2);
+        assert.equal(res2.statusCode, 200);
+        assert.equal(subscribeCalls, 2, 'the repeat share must still be checked against the backend, not short-circuited locally');
+        assert.ok(!fetchMock.calledWith('/claims/bot/verify-and-claim'), 'a repeat share on an already-completed subscription must never fall through to the claim flow');
+
+        // No second success message and no crash — the repeat share is
+        // treated as "nothing pending" (SESSION_INVALID_EXPIRED_OR_CONSUMED
+        // maps to 'not_pending'), which with no claim state falls through to
+        // generic contact handling, never a second subscribe-success message.
+        const sendCalls = fetchMock.calls.filter(c => c.url.includes('/sendMessage'));
+        const secondSend = sendCalls[sendCalls.length - 1];
+        assert.ok(
+            !secondSend.body.text.includes('Вы подписались на уведомления по этой поездке'),
+            'the repeat share must not send a second subscribe-success message'
+        );
     });
 });
