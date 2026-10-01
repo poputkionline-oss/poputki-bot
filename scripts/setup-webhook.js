@@ -27,6 +27,10 @@ try {
 }
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
+if (!BOT_TOKEN) {
+    console.error('BOT_TOKEN is not configured');
+    process.exit(1);
+}
 const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 
 const args = process.argv.slice(2);
