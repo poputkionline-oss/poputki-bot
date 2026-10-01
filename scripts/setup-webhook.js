@@ -1,8 +1,10 @@
 // scripts/setup-webhook.js
-const https = require('https');
-
-const fs = require('fs');
-const path = require('path');
+import https from 'node:https';
+import fs from 'node:fs';
+import path from 'node:path';
+import crypto from 'node:crypto';
+import { fileURLToPath } from 'node:url';
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Load environment variables from .env file if it exists
 try {
@@ -77,7 +79,7 @@ async function main() {
             const res = await callTelegram('setWebhook', { 
                 url,
                 allowed_updates: ["message", "edited_message", "callback_query", "my_chat_member", "chat_member", "poll_answer"],
-                secret_token: require('crypto').createHash('sha256').update('poputki-polls-webhook-v1:' + BOT_TOKEN).digest('hex')
+                secret_token: crypto.createHash('sha256').update('poputki-polls-webhook-v1:' + BOT_TOKEN).digest('hex')
             });
             console.log('Set Webhook Result:', JSON.stringify(res, null, 2));
             
