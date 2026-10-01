@@ -31,7 +31,7 @@ export async function handlePurchasePoll(req, { post = signedBackendPost, send =
     if (!vote && result.status === 'ignored') return false;
     const texts = {
         saved: 'Спасибо! Ваш ответ сохранён и поможет нам улучшить сервис.',
-        custom: 'Напишите, что помешало завершить покупку билета (до 2000 символов). Для отмены — /cancel.',
+        custom: 'Напишите свой ответ на вопрос опроса (до 2000 символов). Для отмены — /cancel.',
         cancelled: 'Ввод ответа отменён.',
         expired: 'Время для ввода ответа истекло.',
         invalid: 'Напишите ответ длиной от 1 до 2000 символов или /cancel.',
