@@ -501,25 +501,10 @@ Set is_spam to true ONLY if confidence is "high". For anything uncertain, set is
           return res.status(200).json({ ok: false, error: "Telegram getMe failed", details: me });
         }
 
-        let selfHealingStatus = "Healthy";
-        if (webhookInfo.result && !webhookInfo.result.url) {
-          log("Webhook missing! Attempting self-healing...");
-          const webhookUrl = `https://${req.headers.host}/api/bot`;
-          const setRes = await fetch(`${TELEGRAM_API}/bot${BOT_TOKEN}/setWebhook`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              url: webhookUrl,
-              allowed_updates: ["message", "edited_message", "callback_query", "my_chat_member", "chat_member"]
-            })
-          });
-          const setResult = await setRes.json();
-          selfHealingStatus = `Self-healed result: ${JSON.stringify(setResult)}`;
-        }
-
+        const selfHealingStatus = webhookInfo.result?.url ? 'Healthy' : 'Missing';
         return res.status(200).json({
           ok: true,
-          version: "4.0.0",
+          version: "polls-v2",
           self_healing: selfHealingStatus,
           bot: me.result,
           webhook: webhookInfo.result,
@@ -533,46 +518,8 @@ Set is_spam to true ONLY if confidence is "high". For anything uncertain, set is
       }
     }
 
-    try {
-      const webhookUrl = url || `https://${req.headers.host}/api/bot`;
-      const setWebhookUrl = `${TELEGRAM_API}/bot${BOT_TOKEN}/setWebhook`;
-
-      log(`Setting webhook to: ${webhookUrl}`);
-
-      const response = await fetch(setWebhookUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          url: webhookUrl,
-          allowed_updates: ["message", "edited_message", "my_chat_member", "chat_member", "callback_query"]
-        })
-      });
-
-      const data = await response.json();
-      return res.status(200).send(`
-        <html>
-          <body style="font-family: sans-serif; padding: 40px; text-align: center; background: #f9fafb;">
-            <div style="max-width: 600px; margin: 0 auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);">
-              <h1 style="color: ${data.ok ? '#22c55e' : '#ef4444'}">${data.ok ? '✅ Webhook Setup Successful' : '❌ Webhook Setup Failed'}</h1>
-              <p style="color: #4b5563;">Webhook URL: <code style="background: #f3f4f6; padding: 2px 6px; border-radius: 4px;">${webhookUrl}</code></p>
-              <div style="text-align: left; margin-top: 20px;">
-                <p style="font-weight: bold; margin-bottom: 8px;">Telegram Response:</p>
-                <pre style="background: #1f2937; color: #f9fafb; padding: 15px; border-radius: 8px; overflow-x: auto; font-size: 14px;">${JSON.stringify(data, null, 2)}</pre>
-              </div>
-              <p style="margin-top: 20px; color: #6b7280; font-size: 14px;">Allowed Updates: <b>message, edited_message, callback_query, my_chat_member, chat_member</b></p>
-              <div style="margin-top: 30px; border-top: 1px solid #e5e7eb; padding-top: 20px;">
-                <a href="/api/bot?status=1" style="color: #3b82f6; text-decoration: none; font-weight: 500;">Check Full Status</a>
-                <span style="margin: 0 15px; color: #d1d5db;">|</span>
-                <a href="${MINI_APP_URL}" style="color: #3b82f6; text-decoration: none; font-weight: 500;">Go to App</a>
-              </div>
-            </div>
-          </body>
-        </html>
-      `);
-    } catch (err) {
-      log(`Setup Error: ${err.message}`);
-      return res.status(500).send(`Error: ${err.message}`);
-    }
+    // Webhook mutation is owned by authenticated backend setup and CLI, never public GET.
+    return res.status(405).json({ ok: false, error: 'WEBHOOK_SETUP_DISABLED', version: 'polls-v2' });
   }
 
   if (req.method === "HEAD") {
@@ -586,106 +533,6 @@ Set is_spam to true ONLY if confidence is "high". For anything uncertain, set is
   try {
     const update = req.body;
     log(`Incoming ${req.method} update:`, update);
-
-    // Handle Poll Answer
-    const pollAnswer = update.poll_answer;
-    if (pollAnswer) {
-      log(`Received poll answer for poll ${pollAnswer.poll_id} from user ${pollAnswer.user.id}`);
-      
-      const sentPollUrl = `${SUPABASE_URL}/rest/v1/sent_polls?poll_id=eq.${pollAnswer.poll_id}&select=*`;
-      const sentResponse = await fetch(sentPollUrl, {
-        headers: {
-          'apikey': SUPABASE_ANON_KEY,
-          'Authorization': `Bearer ${SUPABASE_ANON_KEY}`
-        }
-      });
-      
-      if (sentResponse.ok) {
-        const sentData = await sentResponse.json();
-        const sentPoll = sentData && sentData[0];
-        
-        if (sentPoll) {
-          const { booking_id, user_id, telegram_id } = sentPoll;
-          const selectedOptionIndex = pollAnswer.option_ids[0];
-          
-          if (selectedOptionIndex !== undefined) {
-            if (selectedOptionIndex === 3) {
-              // Custom option ("Ваш вариант") selected. Set bot state.
-              const clearStateUrl = `${SUPABASE_URL}/rest/v1/bot_user_states?telegram_id=eq.${telegram_id}`;
-              await fetch(clearStateUrl, {
-                method: 'DELETE',
-                headers: {
-                  'apikey': SUPABASE_ANON_KEY,
-                  'Authorization': `Bearer ${SUPABASE_ANON_KEY}`
-                }
-              });
-
-              const stateUrl = `${SUPABASE_URL}/rest/v1/bot_user_states`;
-              await fetch(stateUrl, {
-                method: 'POST',
-                headers: {
-                  'apikey': SUPABASE_ANON_KEY,
-                  'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
-                  'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                  telegram_id: telegram_id,
-                  state: 'waiting_for_poll_custom_answer',
-                  data: { booking_id, user_id }
-                })
-              });
-
-              await safeSendMessage({
-                chat_id: telegram_id,
-                text: "Пожалуйста, напишите текстовым сообщением, что именно помешало вам оформить билет."
-              });
-            } else {
-              // Predefined option selected
-              const settingsUrl = `${SUPABASE_URL}/rest/v1/poll_settings?id=eq.1&select=*`;
-              const settingsResponse = await fetch(settingsUrl, {
-                headers: {
-                  'apikey': SUPABASE_ANON_KEY,
-                  'Authorization': `Bearer ${SUPABASE_ANON_KEY}`
-                }
-              });
-              
-              let optionText = 'Unknown option';
-              if (settingsResponse.ok) {
-                const settingsData = await settingsResponse.json();
-                const settings = settingsData && settingsData[0];
-                if (settings) {
-                  if (selectedOptionIndex === 0) optionText = settings.option1;
-                  else if (selectedOptionIndex === 1) optionText = settings.option2;
-                  else if (selectedOptionIndex === 2) optionText = settings.option3;
-                }
-              }
-
-              const answerUrl = `${SUPABASE_URL}/rest/v1/purchase_poll_answers`;
-              await fetch(answerUrl, {
-                method: 'POST',
-                headers: {
-                  'apikey': SUPABASE_ANON_KEY,
-                  'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
-                  'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                  booking_id,
-                  user_id,
-                  telegram_id,
-                  answer: optionText
-                })
-              });
-
-              await safeSendMessage({
-                chat_id: telegram_id,
-                text: "Спасибо за ваш ответ! Это поможет нам сделать сервис лучше."
-              });
-            }
-          }
-        }
-      }
-      return res.status(200).json({ ok: true });
-    }
 
     // Support multiple update types
     const message = update.message || update.edited_message || update.channel_post || update.edited_channel_post;
@@ -770,58 +617,6 @@ Set is_spam to true ONLY if confidence is "high". For anything uncertain, set is
     if (chatType === 'private' && (message || callbackQuery)) {
       const text = message ? (message.text || "") : "";
       log(`Private event from ${chatId}: ${text || '[no text]'}`);
-
-      // Check if user is in a poll custom answer state
-      const stateUrl = `${SUPABASE_URL}/rest/v1/bot_user_states?telegram_id=eq.${chatId}&select=*`;
-      const stateResponse = await fetch(stateUrl, {
-        headers: {
-          'apikey': SUPABASE_ANON_KEY,
-          'Authorization': `Bearer ${SUPABASE_ANON_KEY}`
-        }
-      });
-      
-      let userState = null;
-      if (stateResponse.ok) {
-        const stateData = await stateResponse.json();
-        userState = stateData && stateData[0];
-      }
-
-      if (userState && userState.state === 'waiting_for_poll_custom_answer' && text && !text.startsWith('/')) {
-        log(`User ${chatId} provided custom poll answer: "${text}"`);
-        const { booking_id, user_id } = userState.data || {};
-        
-        const answerUrl = `${SUPABASE_URL}/rest/v1/purchase_poll_answers`;
-        await fetch(answerUrl, {
-          method: 'POST',
-          headers: {
-            'apikey': SUPABASE_ANON_KEY,
-            'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            booking_id: booking_id,
-            user_id: user_id,
-            telegram_id: chatId.toString(),
-            answer: text
-          })
-        });
-
-        const clearStateUrl = `${SUPABASE_URL}/rest/v1/bot_user_states?telegram_id=eq.${chatId}`;
-        await fetch(clearStateUrl, {
-          method: 'DELETE',
-          headers: {
-            'apikey': SUPABASE_ANON_KEY,
-            'Authorization': `Bearer ${SUPABASE_ANON_KEY}`
-          }
-        });
-
-        await safeSendMessage({
-          chat_id: chatId,
-          text: "Спасибо за ваш ответ! Это поможет нам сделать сервис лучше."
-        });
-        
-        return res.status(200).json({ ok: true });
-      }
 
       if (text === '/ping') {
         await safeSendMessage({ chat_id: chatId, text: "Pong! 🏓 Bot is active." });

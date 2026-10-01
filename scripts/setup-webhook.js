@@ -76,7 +76,8 @@ async function main() {
             }
             const res = await callTelegram('setWebhook', { 
                 url,
-                allowed_updates: ["message", "edited_message", "callback_query", "my_chat_member", "chat_member", "poll_answer"]
+                allowed_updates: ["message", "edited_message", "callback_query", "my_chat_member", "chat_member", "poll_answer"],
+                secret_token: require('crypto').createHash('sha256').update('poputki-polls-webhook-v1:' + BOT_TOKEN).digest('hex')
             });
             console.log('Set Webhook Result:', JSON.stringify(res, null, 2));
             

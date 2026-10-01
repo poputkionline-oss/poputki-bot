@@ -1,4 +1,5 @@
 import baseHandler from './bot.js';
+import { handlePurchasePoll } from '../utils/purchasePollHandler.js';
 import { parseDeepLink } from '../utils/deepLinkParser.js';
 import { signedBackendPost } from '../utils/signedBackendClient.js';
 import {
@@ -628,6 +629,12 @@ export default async function handler(req, res) {
   }
 
   const message = req.body?.message;
+  try {
+    if (await handlePurchasePoll(req)) return res.status(200).json({ ok: true });
+  } catch (err) {
+    // Retry transient persistence failures; never acknowledge or thank for a lost answer.
+    return res.status(err.status === 401 ? 401 : 503).json({ ok: false, error: 'POLL_PROCESSING_FAILED' });
+  }
   const isPrivate = message?.chat?.type === 'private';
 
   if (!isPrivate) {
