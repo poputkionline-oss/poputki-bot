@@ -38,7 +38,8 @@ function setTestEnv() {
     process.env.BACKEND_API_URL = 'https://backend.test/api';
     process.env.CLAIM_BOT_SHARED_SECRET = 'test-claim-secret';
     process.env.SUPABASE_URL = 'https://supabase.test';
-    process.env.SUPABASE_ANON_KEY = 'test-anon-key';
+    process.env.SUPABASE_SERVICE_ROLE_KEY = 'test-service-role-key'; // V2.0B-0: bot DB access is service-role only (no anon fallback)
+    delete process.env.SUPABASE_ANON_KEY;
     process.env.MINI_APP_URL = 'https://miniapp.test';
     delete process.env.INTERNAL_SERVICE_SECRET; // signedBackendPost fails closed, swallowed by its own .catch
 }

@@ -2,6 +2,7 @@ import baseHandler from './bot.js';
 import { handlePurchasePoll } from '../utils/purchasePollHandler.js';
 import { parseDeepLink } from '../utils/deepLinkParser.js';
 import { signedBackendPost } from '../utils/signedBackendClient.js';
+import { buildSupabaseRestHeaders } from '../utils/supabaseServerConfig.js';
 import {
   handleWebHandshake,
   handleReferralStart,
@@ -22,7 +23,6 @@ function getConfig() {
     // BOT_TOKEN. No cross-fallback between them.
     claimSecret: process.env.CLAIM_BOT_SHARED_SECRET,
     supabaseUrl: process.env.SUPABASE_URL,
-    supabaseAnonKey: process.env.SUPABASE_ANON_KEY,
     miniAppUrl: (process.env.MINI_APP_URL || 'https://poputki.online').replace(/\/$/, '')
   };
 }
@@ -67,14 +67,10 @@ async function backendPost(path, body) {
   return data;
 }
 
+// SECURITY (V2.0B-0): service-role credentials via the fail-closed helper
+// (throws SupabaseServerConfigError if missing; never falls back to anon).
 function supabaseHeaders(contentType = false) {
-  const { supabaseAnonKey } = getConfig();
-  const headers = {
-    apikey: supabaseAnonKey,
-    Authorization: `Bearer ${supabaseAnonKey}`
-  };
-  if (contentType) headers['Content-Type'] = 'application/json';
-  return headers;
+  return buildSupabaseRestHeaders({ json: contentType });
 }
 
 async function clearClaimState(telegramId) {
