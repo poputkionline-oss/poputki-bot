@@ -1,4 +1,5 @@
 import { callAssistantChat } from '../utils/assistantChatClient.js';
+import { buildSupabaseRestHeaders } from '../utils/supabaseServerConfig.js';
 import { formatAiAssistantResponse, formatAiRateLimitResponse } from '../utils/aiResponseFormatter.js';
 
 const TELEGRAM_API = "https://api.telegram.org";
@@ -10,7 +11,10 @@ export default async function handler(req, res) {
   const MINI_APP_URL = process.env.MINI_APP_URL || 'https://poputki.online';
   const BACKEND_API_URL = process.env.BACKEND_API_URL || 'https://poputki-backend.onrender.com/api';
   const SUPABASE_URL = process.env.SUPABASE_URL;
-  const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
+  // SECURITY (V2.0B-0): direct Supabase REST calls use the SERVICE ROLE key via
+  // supabaseHeaders() (fail-closed: throws if the key is missing; never falls
+  // back to the anon key). The key is never logged or sent to users.
+  const supabaseHeaders = (options) => buildSupabaseRestHeaders(options);
 
   const log = (msg, data = null) => {
     const timestamp = new Date().toISOString();
@@ -113,12 +117,7 @@ export default async function handler(req, res) {
       log(`syncGroup starting for chat: ${cid} (${title})`);
       const response = await fetch(`${SUPABASE_URL}/rest/v1/telegram_groups`, {
         method: 'POST',
-        headers: {
-          'apikey': SUPABASE_ANON_KEY,
-          'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
-          'Content-Type': 'application/json',
-          'Prefer': 'resolution=merge-dupes'
-        },
+        headers: supabaseHeaders({ json: true, extra: { 'Prefer': 'resolution=merge-dupes' } }),
         body: JSON.stringify({
           chat_id: cid.toString(),
           title: title
@@ -376,10 +375,7 @@ Set is_spam to true ONLY if confidence is "high". For anything uncertain, set is
       // Enforce duplicate protection: search for active scraped rides with this route, date, and original driver's phone in description
       const dupQueryUrl = `${SUPABASE_URL}/rest/v1/rides?driver_id=eq.${scraperUserId}&from_city=eq.${encodeURIComponent(fromCityNormalized)}&to_city=eq.${encodeURIComponent(toCityNormalized)}&date=eq.${dateStr}&status=eq.active&description=ilike.*${phone.replace('+', '')}*&select=id`;
       const dupRes = await fetch(dupQueryUrl, {
-        headers: {
-          'apikey': SUPABASE_ANON_KEY,
-          'Authorization': `Bearer ${SUPABASE_ANON_KEY}`
-        }
+        headers: supabaseHeaders()
       });
 
       if (dupRes.ok) {
@@ -627,13 +623,15 @@ Set is_spam to true ONLY if confidence is "high". For anything uncertain, set is
       if (text.startsWith('/start')) {
         // Clear state just in case they were waiting for custom answer
         const clearStateUrl = `${SUPABASE_URL}/rest/v1/bot_user_states?telegram_id=eq.${chatId}`;
-        await fetch(clearStateUrl, {
-          method: 'DELETE',
-          headers: {
-            'apikey': SUPABASE_ANON_KEY,
-            'Authorization': `Bearer ${SUPABASE_ANON_KEY}`
-          }
-        });
+        try {
+          await fetch(clearStateUrl, {
+            method: 'DELETE',
+            headers: supabaseHeaders()
+          });
+        } catch (stateErr) {
+          // Non-critical: never block /start on state cleanup (e.g. DB credentials unavailable).
+          log('bot_user_states cleanup skipped', { error: stateErr.code || stateErr.name });
+        }
 
         const parts = text.split(' ');
         const param = parts.length > 1 ? parts[1] : null;
@@ -655,10 +653,7 @@ Set is_spam to true ONLY if confidence is "high". For anything uncertain, set is
             try {
               const rideUrl = `${SUPABASE_URL}/rest/v1/rides?id=eq.${rideId}&select=*`;
               const rideResponse = await fetch(rideUrl, {
-                headers: {
-                  'apikey': SUPABASE_ANON_KEY,
-                  'Authorization': `Bearer ${SUPABASE_ANON_KEY}`
-                }
+                headers: supabaseHeaders()
               });
 
               if (!rideResponse.ok) {
@@ -727,10 +722,7 @@ Set is_spam to true ONLY if confidence is "high". For anything uncertain, set is
             try {
               const busUrl = `${SUPABASE_URL}/rest/v1/bus_tickets?id=eq.${busId}&select=*`;
               const busResponse = await fetch(busUrl, {
-                headers: {
-                  'apikey': SUPABASE_ANON_KEY,
-                  'Authorization': `Bearer ${SUPABASE_ANON_KEY}`
-                }
+                headers: supabaseHeaders()
               });
 
               if (!busResponse.ok) {
