@@ -1,5 +1,7 @@
 import baseHandler from './bot.js';
-import { handlePurchasePoll } from '../utils/purchasePollHandler.js';
+import { handleGeolocation, locationKeyboard } from '../utils/geolocationHandler.js';
+import { handlePurchasePoll, pollWebhookSecret } from '../utils/purchasePollHandler.js';
+import { timingSafeEqual } from 'node:crypto';
 import { parseDeepLink } from '../utils/deepLinkParser.js';
 import { signedBackendPost } from '../utils/signedBackendClient.js';
 import { buildSupabaseRestHeaders } from '../utils/supabaseServerConfig.js';
@@ -632,6 +634,25 @@ export default async function handler(req, res) {
     return res.status(err.status === 401 ? 401 : 503).json({ ok: false, error: 'POLL_PROCESSING_FAILED' });
   }
   const isPrivate = message?.chat?.type === 'private';
+  // Intercept location before the legacy handler, which logs raw updates.
+  if (isPrivate && (message.location || message.text === '/location')) {
+    const config = getConfig();
+    const secret = req.headers?.['x-telegram-bot-api-secret-token'];
+    const expected = config.botToken ? pollWebhookSecret(config.botToken) : '';
+    if (!expected || typeof secret !== 'string' || secret.length !== expected.length
+        || !timingSafeEqual(Buffer.from(secret), Buffer.from(expected))) {
+      return res.status(401).json({ ok: false, error: 'UNTRUSTED_LOCATION_WEBHOOK' });
+    }
+    const send = payload => sendMessage(config.botToken, payload);
+    try {
+      if (message.location) await handleGeolocation(message, { ...config, sendMessage: send });
+      else await send({ chat_id: message.chat.id,
+        text: 'Передайте геолокацию, чтобы определить ближайший город отправления. Это необязательно: город можно выбрать вручную.',
+        reply_markup: locationKeyboard });
+    } catch { /* Do not retry a webhook and send duplicate responses. */ }
+    return res.status(200).json({ ok: true });
+  }
+
 
   if (!isPrivate) {
     return baseHandler(req, res);

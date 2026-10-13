@@ -1,3 +1,4 @@
+import { locationKeyboard } from '../utils/geolocationHandler.js';
 /**
  * api/acquisitionBotHandler.js
  *
@@ -141,7 +142,8 @@ export async function handleGenericStart(message) {
     '',
     'Выберите нужное действие:',
     '',
-    `Если кнопка ниже не открывается: ${busSearchUrl}`
+    `Если кнопка ниже не открывается: ${busSearchUrl}`,
+    '📍 Чтобы определить город отправления, передайте геолокацию через кнопку ниже.'
   ].join('\n');
 
   await sendMessage(botToken, {
@@ -153,6 +155,11 @@ export async function handleGenericStart(message) {
         [{ text: '🎫 Мои билеты', web_app: { url: `${miniAppUrl}/my-bus-tickets` } }]
       ]
     }
+  });
+  await sendMessage(botToken, {
+    chat_id: chatId,
+    text: 'Определить ближайший город отправления? Геолокация необязательна; Вы можете выбрать город вручную.',
+    reply_markup: locationKeyboard
   });
 }
 
