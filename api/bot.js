@@ -528,7 +528,10 @@ Set is_spam to true ONLY if confidence is "high". For anything uncertain, set is
 
   try {
     const update = req.body;
-    log(`Incoming ${req.method} update:`, update);
+    // Location messages must never put exact coordinates into function logs.
+    log(`Incoming ${req.method} update:`,
+      [update.message, update.edited_message, update.channel_post, update.edited_channel_post].some(m => m?.location)
+        ? { update_id: update.update_id, type: 'location' } : update);
 
     // Support multiple update types
     const message = update.message || update.edited_message || update.channel_post || update.edited_channel_post;
