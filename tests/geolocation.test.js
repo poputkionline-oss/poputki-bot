@@ -77,3 +77,9 @@ test('Malformed and imprecise coordinates are rejected', () => {
   for (const [lat, lon, accuracy] of [[null, 69], ['40', 69], [NaN, 69], [91, 0], [0, 181], [40.28256,69.62216,10001]])
     assert.equal(resolveGeoCity(lat, lon, ['Худжанд'], accuracy), null);
 });
+
+test('Live service names retain country suffixes and enforce their countries', () => {
+  assert.equal(resolveGeoCity(40.28256, 69.62216, ['Худжанд (TJ)', 'Душанбе (TJ)']), 'Худжанд (TJ)');
+  assert.equal(resolveGeoCity(61.25, 73.41667, ['Сургут (РФ)']), 'Сургут (РФ)');
+  assert.equal(resolveGeoCity(40.28256, 69.62216, ['Худжанд (UZ)']), null);
+});
